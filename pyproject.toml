@@ -1,0 +1,39 @@
+[project]
+name = "ai-agentic-os"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.105.2",
+    "chromadb>=1.5.9",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "python-dotenv>=1.2.2",
+    "rich>=15.0.0",
+    "sqlite-utils>=3.39",
+    "structlog>=25.5.0",
+    "typer>=0.26.7",
+    "google-auth>=2.0",
+    "google-auth-oauthlib>=1.0",
+    "google-api-python-client>=2.0",
+]
+
+[tool.uv]
+package = true
+
+[project.scripts]
+agent = "agent.cli:app"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pyright]
+pythonPath = "src"

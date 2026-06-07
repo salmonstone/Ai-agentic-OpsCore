@@ -1,0 +1,72 @@
+[
+  {
+    "id": "email-001",
+    "sender": "ops-alerts@infra.acmecorp.com",
+    "subject": "CRITICAL: Production database unreachable — all services down",
+    "body": "ALERT: The primary RDS instance prod-db-01 stopped responding at 03:14 UTC. All API endpoints are returning 503. Approximately 8,400 active users are affected. Auto-failover failed. On-call engineer has been paged but has not responded. We need immediate intervention. Revenue impact: ~$12,000/minute.",
+    "timestamp": "2025-06-05T03:18:00"
+  },
+  {
+    "id": "email-002",
+    "sender": "security@vendor-scan.io",
+    "subject": "URGENT: Zero-day CVE-2025-4821 found in your auth service",
+    "body": "Our scanner detected CVE-2025-4821 (CVSS 9.8) in the JWT library version you are running in production. This vulnerability allows unauthenticated remote code execution. Public exploit code was published 2 hours ago. Patch available: jwt-lib 4.2.1. You should patch immediately. Contact security@vendor-scan.io for a detailed remediation guide.",
+    "timestamp": "2025-06-05T09:05:00"
+  },
+  {
+    "id": "email-003",
+    "sender": "sarah.chen@acmecorp.com",
+    "subject": "Q3 roadmap review — can we meet Thursday or Friday?",
+    "body": "Hi, I wanted to catch up on the Q3 roadmap before we head into the next sprint planning. The executive team has some questions about the ML pipeline timeline and I'd like to get your input before the board meeting on Monday. Would Thursday 2pm or Friday 10am work for a 45-minute call? I'll send the agenda in advance. Thanks, Sarah",
+    "timestamp": "2025-06-05T10:22:00"
+  },
+  {
+    "id": "email-004",
+    "sender": "james.okafor@partner-ventures.com",
+    "subject": "Partnership proposal — AI integration for our platform",
+    "body": "Hello, I'm the CTO at Partner Ventures. We've been following your work and believe there's a strong synergy between our data platform and your AI capabilities. We're proposing a technical integration that could expand both our customer bases. I've attached a one-pager. We'd love to explore this over a call this week or next. Budget is approved on our side. Looking forward to hearing from you. Best, James",
+    "timestamp": "2025-06-05T11:45:00"
+  },
+  {
+    "id": "email-005",
+    "sender": "no-reply@github.com",
+    "subject": "Action required: Dependabot alert — critical vulnerability in requests 2.28.0",
+    "body": "Dependabot has found a critical vulnerability in requests 2.28.0 used in repository acmecorp/backend-api. CVE-2024-35195 allows SSRF attacks via malicious redirect. Dependabot has opened pull request #847 to upgrade to requests 2.32.0. Please review and merge: https://github.com/acmecorp/backend-api/pull/847",
+    "timestamp": "2025-06-05T12:10:00"
+  },
+  {
+    "id": "email-006",
+    "sender": "digest@tldr.tech",
+    "subject": "TLDR Tech — June 5, 2025: OpenAI releases o4-mini, Nvidia hits $4T",
+    "body": "Good morning! Here is your daily tech digest. TOP STORIES: 1) OpenAI releases o4-mini with improved reasoning at lower cost. 2) Nvidia becomes the first company to hit $4 trillion market cap. 3) EU passes new AI liability directive. 4) Apple WWDC keynote scheduled for June 10. 5) GitHub Copilot now supports 50 more languages. Read more at tldr.tech",
+    "timestamp": "2025-06-05T07:00:00"
+  },
+  {
+    "id": "email-007",
+    "sender": "hr@acmecorp.com",
+    "subject": "Team lunch this Friday — RSVP by Wednesday",
+    "body": "Hi team! We're organising a team lunch this Friday June 7th at Olive Garden, 12:30pm. This is a great chance to catch up with everyone before the summer. Please RSVP by Wednesday so we can confirm numbers with the restaurant. Reply to this email with YES or NO. Dietary requirements noted in the booking form below. See you there! — HR Team",
+    "timestamp": "2025-06-05T09:30:00"
+  },
+  {
+    "id": "email-008",
+    "sender": "noreply@staples.com",
+    "subject": "Your order #STL-882941 has shipped — arrives June 7",
+    "body": "Thank you for your order from Staples Business Advantage. Your order #STL-882941 (1x standing desk mat, 3x whiteboard markers, 2x monitor stands) has shipped via FedEx. Tracking number: 794644774899. Estimated delivery: Friday June 7, 2025 by 8pm. Track your package at fedex.com.",
+    "timestamp": "2025-06-05T14:00:00"
+  },
+  {
+    "id": "email-009",
+    "sender": "winner-notify@prize-draw-international.net",
+    "subject": "Congratulations! You have been selected — claim your $50,000 reward",
+    "body": "CONGRATULATIONS! Our international prize committee has randomly selected YOUR email address to receive a cash reward of $50,000 USD. To claim your prize, simply reply with your full name, address, date of birth, and bank account details for transfer. This offer expires in 24 hours. You have been pre-verified. No purchase necessary. Respond NOW to claim!",
+    "timestamp": "2025-06-05T08:15:00"
+  },
+  {
+    "id": "email-010",
+    "sender": "invest@crypto-gains-pro.biz",
+    "subject": "Turn $500 into $50,000 in 30 days — guaranteed crypto returns",
+    "body": "Dear Investor, Our proprietary AI trading algorithm has delivered 9,900% returns for our members in the past 30 days. Invest just $500 USDT and watch it grow to $50,000 guaranteed. Withdrawal available at any time. No experience needed. Join 47,000 happy investors. Limited spots available. Click here to register before midnight: crypto-gains-pro.biz/register?ref=X9K2",
+    "timestamp": "2025-06-05T06:45:00"
+  }
+]
