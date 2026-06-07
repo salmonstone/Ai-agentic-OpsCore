@@ -2,6 +2,8 @@
 
 An AI-powered command-line operations platform. Manage Kubernetes clusters, AWS infrastructure, Gmail, and more — all from one unified CLI with natural language understanding and persistent memory.
 
+→ **[Architecture & Design Decisions](ARCHITECTURE.md)**
+
 ## Quick Install
 
 ```bash
@@ -127,25 +129,17 @@ LLM_EXPENSIVE_MODEL=claude-opus-4-8
 
 ## Architecture
 
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full system diagram, module map, data flow walkthroughs, and key design decisions.
+
 ```
 src/agent/
-├── cli.py              # Typer CLI — all commands
+├── cli.py              # All commands (Typer + Rich)
 ├── config.py           # Pydantic settings from .env
-├── core/               # LLM client (Anthropic + fallbacks)
-├── integrations/
-│   ├── aws.py          # EC2, EIP, LB, SG collectors + fixers
-│   ├── kubectl.py      # Kubernetes typed API wrappers
-│   └── collectors.py   # Parallel cluster data collection
-├── memory/
-│   ├── store.py        # SQLite memory store
-│   ├── embeddings.py   # ChromaDB + Voyage AI embeddings
-│   └── retrieval.py    # remember() / recall() API
-├── skills/
-│   ├── full_scan.py    # k8s full-scan AI analysis
-│   ├── gmail.py        # Gmail skill
-│   └── setup.py        # Setup wizard
-└── observability/
-    └── logging.py      # Structured logging
+├── core/               # LLM client — single entrypoint for Claude
+├── integrations/       # Raw data: kubectl, AWS boto3, TLS, DNS, network
+├── skills/             # AI-powered operations (14 skills)
+├── memory/             # SQLite + ChromaDB + Vault markdown
+└── observability/      # Structured logging + cost tracking
 ```
 
 ## License
