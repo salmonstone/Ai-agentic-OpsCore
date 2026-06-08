@@ -82,17 +82,25 @@ def _read_env() -> dict[str, str]:
 
 def _write_env(env: dict[str, str]) -> None:
     """Write env dict back to .env, preserving order."""
-    lines = []
-    for k, v in env.items():
-        lines.append(f"{k}={v}")
+    lines = [f"{k}={v}" for k, v in env.items()]
     _ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# Module-level cache — populated once at wizard start, flushed at the end.
+# Avoids read-write-read cycles that scramble values on Windows.
+_env_cache: dict[str, str] = {}
+
+
 def _set_env(key: str, value: str) -> None:
-    env = _read_env()
-    env[key] = value
-    _write_env(env)
+    """Update the in-memory env cache and the process environment.
+    Does NOT write to disk — call _flush_env() once at the end."""
+    _env_cache[key] = value
     os.environ[key] = value
+
+
+def _flush_env() -> None:
+    """Write the accumulated env cache to .env in one atomic write."""
+    _write_env(_env_cache)
 
 
 def _section(title: str) -> None:
@@ -607,6 +615,11 @@ class SetupWizard:
     # ── Main entry ────────────────────────────────────────────────────────────
 
     def run(self) -> None:
+        global _env_cache
+        # Load the existing .env into the cache ONCE — all _set_env calls
+        # update this dict; _flush_env() writes it to disk in one shot.
+        _env_cache = _read_env()
+
         console.print()
         console.print(Panel(
             "[bold cyan]AI Agentic OS — Setup Wizard[/bold cyan]\n\n"
@@ -626,5 +639,7 @@ class SetupWizard:
         except KeyboardInterrupt:
             console.print("\n\n  [yellow]Setup interrupted.[/yellow]")
             console.print("  [dim]Run[/dim] [cyan]agent setup[/cyan] [dim]to continue.[/dim]\n")
+        finally:
+            _flush_env()  # single atomic write — no scrambled values
 
         self.show_summary()
