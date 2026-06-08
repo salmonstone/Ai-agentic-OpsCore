@@ -403,21 +403,74 @@ def collect_tls() -> dict:
     })
 
 
+def collect_deployments() -> dict:
+    """
+    Deployment + StatefulSet health — flags scaled-to-zero and unavailable workloads.
+    NAMESPACE  NAME  READY  UP-TO-DATE  AVAILABLE  AGE
+    """
+    scaled_zero:   list[str] = []
+    unavailable:   list[str] = []
+    healthy:       list[str] = []
+
+    for kind in ("deployments", "statefulsets"):
+        r = run_kubectl(["get", kind, "-A", "--no-headers"])
+        if not r.success:
+            continue
+        for line in _lines(r):
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            ns   = parts[0]
+            name = parts[1]
+            # READY column: "2/2" or "0/0" or "1/3"
+            ready_raw = parts[2]
+            try:
+                current, desired = (int(x) for x in ready_raw.split("/"))
+            except (ValueError, IndexError):
+                continue
+
+            label = f"{ns}/{name} ({kind[:-1]})"
+            if desired == 0:
+                scaled_zero.append(label)
+            elif current < desired:
+                unavailable.append(f"{label}: {current}/{desired} ready")
+            else:
+                healthy.append(label)
+
+    issues = scaled_zero + unavailable
+    summary = (
+        f"{len(healthy)} healthy, {len(scaled_zero)} scaled-to-zero, "
+        f"{len(unavailable)} unavailable."
+    )
+    if scaled_zero:
+        summary += "\nScaled to zero (0 replicas):\n" + "\n".join(f"  {w}" for w in scaled_zero)
+    if unavailable:
+        summary += "\nUnavailable pods:\n" + "\n".join(f"  {w}" for w in unavailable)
+
+    return _ok(summary, {
+        "scaled_zero": scaled_zero,
+        "unavailable": unavailable,
+        "healthy": healthy,
+        "issues": issues,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Parallel orchestrator
 # ---------------------------------------------------------------------------
 
 COLLECTORS = {
-    "nodes":   collect_nodes,
-    "pods":    collect_pods,
-    "dns":     collect_dns,
-    "network": collect_network,
-    "pvcs":    collect_pvcs,
-    "jobs":    collect_jobs,
-    "hpa":     collect_hpa,
-    "ingress": collect_ingress,
-    "rbac":    collect_rbac,
-    "tls":     collect_tls,
+    "nodes":       collect_nodes,
+    "pods":        collect_pods,
+    "deployments": collect_deployments,
+    "dns":         collect_dns,
+    "network":     collect_network,
+    "pvcs":        collect_pvcs,
+    "jobs":        collect_jobs,
+    "hpa":         collect_hpa,
+    "ingress":     collect_ingress,
+    "rbac":        collect_rbac,
+    "tls":         collect_tls,
 }
 
 

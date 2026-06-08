@@ -103,14 +103,44 @@ class K8sSkill(BaseSkill):
         """
         Fast scan — kubectl only, no Claude call.
         Returns lightweight diagnoses with accurate confidence per status.
+        Also catches deployments/statefulsets scaled to 0 (no pods to find otherwise).
         """
+        from agent.integrations.collectors import collect_deployments
+        diagnoses: list[PodDiagnosis] = []
+
+        # ── Scaled-to-zero deployments (invisible to pod scan) ─────────────
+        dep_result = collect_deployments()
+        for label in dep_result.get("data", {}).get("scaled_zero", []):
+            # label format: "namespace/name (deployment)" or "namespace/name (statefulset)"
+            try:
+                ns_name, kind_raw = label.rsplit(" ", 1)
+                ns, name = ns_name.split("/", 1)
+                kind = "statefulset" if "statefulset" in kind_raw else "deployment"
+            except ValueError:
+                continue
+            if namespace != "all" and ns != namespace:
+                continue
+            diagnoses.append(PodDiagnosis(
+                pod=name,
+                namespace=ns,
+                problem_type=ProblemType.UNKNOWN,
+                root_cause=f"{kind.capitalize()} '{name}' in '{ns}' is scaled to 0 replicas — no pods running.",
+                suggested_fix=f"Scale up: kubectl scale {kind} {name} -n {ns} --replicas=1",
+                fix_command=f"kubectl scale {kind} {name} -n {ns} --replicas=1",
+                confidence="high",
+                explanation="Desired replicas = 0. Either intentionally scaled down or misconfigured.",
+            ))
+
+        # ── Unhealthy / restarting pods ────────────────────────────────────
         pods = get_problematic_pods()
         if namespace != "all":
             pods = [p for p in pods if p.namespace == namespace]
 
-        log.info("k8s.scan_cluster", namespace=namespace, problematic=len(pods))
+        log.info("k8s.scan_cluster", namespace=namespace,
+                 scaled_zero=len(dep_result.get("data", {}).get("scaled_zero", [])),
+                 problematic=len(pods))
 
-        return [
+        diagnoses += [
             PodDiagnosis(
                 pod=pod.name,
                 namespace=pod.namespace,
@@ -118,7 +148,6 @@ class K8sSkill(BaseSkill):
                 root_cause=f"Pod is in {pod.status} state with {pod.restarts} restart(s).",
                 suggested_fix="Run `agent k8s diagnose` for a full AI diagnosis and fix.",
                 fix_command=None,
-                # OOMKilled / ImagePullBackOff are unambiguous from status alone
                 confidence="high" if pod.status in _HIGH_CONFIDENCE_STATUSES else "medium",
                 explanation=(
                     f"Status: {pod.status}, Ready: {pod.ready}, "
@@ -127,6 +156,7 @@ class K8sSkill(BaseSkill):
             )
             for pod in pods
         ]
+        return diagnoses
 
     def diagnose_pod(self, pod: PodInfo) -> PodDiagnosis:
         logs        = get_pod_logs(pod.name, pod.namespace)

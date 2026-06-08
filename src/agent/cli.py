@@ -955,36 +955,67 @@ def k8s_scan(
             console.print()
             return
 
-        table = Table(
-            title=f"[bold red]{len(diagnoses)} problem(s) found[/bold red]",
-            show_lines=True,
-            header_style="bold cyan",
-            border_style="dim",
-        )
-        table.add_column("Pod",        max_width=36, no_wrap=True)
-        table.add_column("Problem",    width=22)
-        table.add_column("Namespace",  width=16)
-        table.add_column("Restarts",   justify="right", width=9)
-        table.add_column("Confidence", justify="center", width=11)
+        # Split: scaled-to-zero deployments vs unhealthy pods
+        scaled   = [d for d in diagnoses if d.fix_command and "scale" in d.fix_command]
+        pod_issues = [d for d in diagnoses if d not in scaled]
 
-        for d in diagnoses:
-            table.add_row(
-                d.pod,
-                f"[bold red]{d.problem_type.value}[/bold red]",
-                d.namespace,
-                "",            # restarts not stored in PodDiagnosis
-                _confidence_markup(d.confidence),
+        # ── Scaled-to-zero section ─────────────────────────────────────────
+        if scaled:
+            stbl = Table(
+                title=f"[bold red]{len(scaled)} deployment(s) scaled to zero[/bold red]",
+                show_lines=True,
+                header_style="bold red",
+                border_style="dim",
             )
+            stbl.add_column("Deployment/StatefulSet", max_width=36, no_wrap=True)
+            stbl.add_column("Namespace", width=18)
+            stbl.add_column("Fix Command", min_width=46)
 
-        console.print(table)
-        console.print()
+            for d in scaled:
+                stbl.add_row(
+                    f"[bold]{d.pod}[/bold]",
+                    d.namespace,
+                    f"[bold cyan]{_escape(d.fix_command)}[/bold cyan]",
+                )
+            console.print(stbl)
+            console.print()
 
-        # Hint for next step
-        first = diagnoses[0]
-        console.print(
-            f"  [dim]Run:[/dim] [bold]agent k8s diagnose {first.pod} -n {first.namespace}[/bold]"
-        )
-        console.print()
+            if not pod_issues:
+                console.print(
+                    "  [dim]Run the fix commands above, or use[/dim] "
+                    "[bold]agent k8s scan --fix[/bold] [dim]to apply automatically.[/dim]"
+                )
+                console.print()
+
+        # ── Unhealthy pods section ─────────────────────────────────────────
+        if pod_issues:
+            table = Table(
+                title=f"[bold red]{len(pod_issues)} unhealthy pod(s)[/bold red]",
+                show_lines=True,
+                header_style="bold cyan",
+                border_style="dim",
+            )
+            table.add_column("Pod",        max_width=36, no_wrap=True)
+            table.add_column("Problem",    width=22)
+            table.add_column("Namespace",  width=16)
+            table.add_column("Confidence", justify="center", width=11)
+
+            for d in pod_issues:
+                table.add_row(
+                    d.pod,
+                    f"[bold red]{d.problem_type.value}[/bold red]",
+                    d.namespace,
+                    _confidence_markup(d.confidence),
+                )
+
+            console.print(table)
+            console.print()
+
+            first = pod_issues[0]
+            console.print(
+                f"  [dim]Run:[/dim] [bold]agent k8s diagnose {first.pod} -n {first.namespace}[/bold]"
+            )
+            console.print()
 
     except typer.Exit:
         raise
@@ -1564,6 +1595,7 @@ def k8s_overview(
 _AREA_COLOR = {
     "nodes":       "cyan",
     "pods":        "green",
+    "deployments": "bold red",
     "dns":         "blue",
     "network":     "magenta",
     "pvcs":        "yellow",

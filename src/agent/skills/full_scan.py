@@ -36,7 +36,7 @@ Return JSON only:
   "issues": [
     {
       "severity": "critical" | "warning" | "info",
-      "area": "nodes|dns|network|pvcs|jobs|hpa|ingress|rbac|pods|tls",
+      "area": "nodes|dns|network|pvcs|jobs|hpa|ingress|rbac|pods|tls|deployments",
       "resource": "<specific resource name>",
       "namespace": "<namespace or empty>",
       "description": "clear one-sentence description of the problem",
@@ -53,8 +53,18 @@ severity rules:
 - warning:  degraded, will become critical if left alone
 - info:     best practice violation, not urgent
 
+severity rules:
+- critical: actively broken, causing downtime or data loss risk
+- warning:  degraded, will become critical if left alone
+- info:     best practice violation, not urgent
+
 deep_dive: set true ONLY if the issue needs pod logs or full YAML to fix properly
-fix_command: provide whenever a single kubectl command can fix or investigate the issue"""
+fix_command: provide whenever a single kubectl command can fix or investigate the issue
+
+deployment fix patterns (use these exactly):
+- scaled to zero:   kubectl scale deployment <name> -n <namespace> --replicas=1
+- statefulset zero: kubectl scale statefulset <name> -n <namespace> --replicas=1
+- unavailable pods: kubectl rollout restart deployment/<name> -n <namespace>"""
 
 _DEEP_DIVE_SYSTEM = """You are a Kubernetes SRE doing a deep-dive on a specific issue.
 You have pod logs, events, and the resource YAML.
