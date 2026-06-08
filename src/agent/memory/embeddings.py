@@ -95,6 +95,28 @@ _collection:         chromadb.Collection | None       = None
 _chroma_unavailable: bool                             = False
 
 
+def _create_collection() -> chromadb.Collection:
+    return _client.get_or_create_collection(
+        name=_COLLECTION_NAME,
+        embedding_function=_make_embedding_fn(),
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+def _reset_collection(reason: str) -> chromadb.Collection:
+    """Delete the existing collection and recreate it with the current embedding dimension."""
+    log.warning(
+        "memory.embeddings.collection_reset",
+        reason=reason,
+        hint="Old vectors cleared — memories still in SQLite, will re-embed on next save",
+    )
+    try:
+        _client.delete_collection(_COLLECTION_NAME)
+    except Exception:
+        pass
+    return _create_collection()
+
+
 def _get_collection() -> chromadb.Collection | None:
     global _client, _collection, _chroma_unavailable
     if _chroma_unavailable:
@@ -102,11 +124,7 @@ def _get_collection() -> chromadb.Collection | None:
     if _collection is None:
         try:
             _client     = chromadb.PersistentClient(path=_CHROMA_PATH)
-            _collection = _client.get_or_create_collection(
-                name=_COLLECTION_NAME,
-                embedding_function=_make_embedding_fn(),
-                metadata={"hnsw:space": "cosine"},
-            )
+            _collection = _create_collection()
             log.info("memory.embeddings.collection_ready",
                      name=_COLLECTION_NAME, path=_CHROMA_PATH)
         except Exception as exc:
@@ -120,12 +138,26 @@ def _get_collection() -> chromadb.Collection | None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _is_dim_error(exc: Exception) -> bool:
+    return "dimension" in str(exc).lower()
+
+
 def add_embedding(memory_id: str, content: str, metadata: dict | None = None) -> None:
+    global _collection
     col = _get_collection()
     if col is None:
         return
-    col.upsert(ids=[memory_id], documents=[content], metadatas=[metadata or {}])
-    log.debug("memory.embeddings.added", id=memory_id)
+    try:
+        col.upsert(ids=[memory_id], documents=[content], metadatas=[metadata or {}])
+        log.debug("memory.embeddings.added", id=memory_id)
+    except Exception as exc:
+        if _is_dim_error(exc):
+            # Old collection has wrong dimension — auto-migrate and retry
+            _collection = _reset_collection(f"dimension mismatch on upsert: {exc}")
+            _collection.upsert(ids=[memory_id], documents=[content], metadatas=[metadata or {}])
+            log.debug("memory.embeddings.added_after_reset", id=memory_id)
+        else:
+            log.warning("memory.embeddings.upsert_failed", id=memory_id, error=str(exc)[:120])
 
 
 def search_similar(query: str, limit: int = 5) -> list[dict]:
@@ -134,14 +166,22 @@ def search_similar(query: str, limit: int = 5) -> list[dict]:
     Each result: { id, content, metadata, distance }
     Distance is cosine — 0 = identical, 1 = orthogonal.
     """
+    global _collection
     col = _get_collection()
     if col is None:
         return []
     if col.count() == 0:
         return []
 
-    n       = min(limit, col.count())
-    results = col.query(query_texts=[query], n_results=n)
+    n = min(limit, col.count())
+    try:
+        results = col.query(query_texts=[query], n_results=n)
+    except Exception as exc:
+        if _is_dim_error(exc):
+            _collection = _reset_collection(f"dimension mismatch on query: {exc}")
+            return []  # collection is now empty — caller falls back to get_recent()
+        log.warning("memory.embeddings.query_failed", error=str(exc)[:120])
+        return []
 
     return [
         {
