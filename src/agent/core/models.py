@@ -516,3 +516,75 @@ class Memory(BaseModel):
     metadata:   dict[str, Any] = Field(default_factory=dict)
     created_at: datetime       = Field(default_factory=datetime.utcnow)
     embedding:  list[float] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Resource Monitor domain
+# ---------------------------------------------------------------------------
+
+class NodeResourceMetrics(BaseModel):
+    name:           str
+    cpu_usage:      str        # e.g. "450m"
+    cpu_percent:    int        # 0-100
+    memory_usage:   str        # e.g. "2Gi"
+    memory_percent: int        # 0-100
+    status:         str        # "healthy" | "warning" | "critical"
+    pressure:       bool       # True if any metric is at critical level
+
+
+class PodResourceMetrics(BaseModel):
+    name:           str
+    namespace:      str
+    cpu_usage:      str
+    cpu_percent:    int        # 0 if no cpu limit set
+    memory_usage:   str
+    memory_percent: int        # 0 if no memory limit set
+    cpu_limit:      str        # "none" if not set
+    memory_limit:   str        # "none" if not set
+    at_risk:        bool
+    risk_type:      str        # "cpu" | "memory" | "both" | "no_limits" | "none"
+
+
+class ResourceLimits(BaseModel):
+    cpu_limit:      str
+    memory_limit:   str
+    cpu_request:    str
+    memory_request: str
+    has_limits:     bool
+    has_requests:   bool
+
+
+class HPAInfo(BaseModel):
+    name:             str
+    namespace:        str
+    target:           str
+    min_replicas:     int
+    max_replicas:     int
+    current_replicas: int
+    cpu_target:       int
+    cpu_current:      int
+
+
+class ResourceAlert(BaseModel):
+    pod_or_node:    str
+    namespace:      str        = ""
+    alert_type:     str        # "CPU_HIGH" | "MEM_HIGH" | "NO_LIMITS" | "OOM_RISK"
+    severity:       str        # "critical" | "warning" | "info"
+    current_usage:  str
+    limit:          str
+    percent_used:   int
+    recommendation: str
+    fix_command:    str | None = None
+    auto_fix:       bool       = False
+
+
+class ResourceReport(BaseModel):
+    nodes:               list[NodeResourceMetrics]  = Field(default_factory=list)
+    pods:                list[PodResourceMetrics]   = Field(default_factory=list)
+    alerts:              list[ResourceAlert]        = Field(default_factory=list)
+    critical_count:      int                        = 0
+    warning_count:       int                        = 0
+    healthy_count:       int                        = 0
+    pods_without_limits: list[str]                  = Field(default_factory=list)
+    claude_analysis:     str                        = ""
+    generated_at:        str                        = ""

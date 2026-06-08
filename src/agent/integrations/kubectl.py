@@ -308,6 +308,130 @@ def get_problematic_pods() -> list[PodInfo]:
     return bad
 
 
+def get_node_issues() -> list[dict]:
+    """Nodes that are not in Ready state."""
+    result = run_kubectl(["get", "nodes", "--no-headers"])
+    if not result.success:
+        return []
+    issues = []
+    for line in result.output.strip().splitlines():
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name, status = parts[0], parts[1]
+        if status != "Ready":
+            issues.append({
+                "category": "node",
+                "severity": "critical",
+                "resource": name,
+                "namespace": "",
+                "description": f"Node '{name}' is {status} — pods cannot be scheduled here",
+                "fix_command": f"kubectl describe node {name}",
+            })
+    return issues
+
+
+def get_quota_issues() -> list[dict]:
+    """Namespaces where a FailedCreate event signals resource quota exceeded."""
+    result = run_kubectl([
+        "get", "events", "-A", "--no-headers",
+        "--field-selector", "reason=FailedCreate",
+    ])
+    if not result.success:
+        return []
+    seen: set[str] = set()
+    issues = []
+    for line in result.output.strip().splitlines():
+        if not line.strip() or "quota" not in line.lower():
+            continue
+        parts = line.split()
+        ns = parts[0] if parts else "unknown"
+        if ns in seen:
+            continue
+        seen.add(ns)
+        issues.append({
+            "category": "quota",
+            "severity": "critical",
+            "resource": "ResourceQuota",
+            "namespace": ns,
+            "description": f"Resource quota exceeded in '{ns}' — new pods blocked",
+            "fix_command": f"kubectl describe resourcequota -n {ns}",
+        })
+    return issues
+
+
+def get_probe_failures() -> list[dict]:
+    """Pods with recent liveness or readiness probe failures (Unhealthy events)."""
+    result = run_kubectl([
+        "get", "events", "-A", "--no-headers",
+        "--field-selector", "reason=Unhealthy",
+    ])
+    if not result.success:
+        return []
+    seen: set[str] = set()
+    issues = []
+    for line in result.output.strip().splitlines():
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        ns = parts[0]
+        # OBJECT column is like "Pod/pod-name"
+        obj = parts[4] if len(parts) > 4 else ""
+        pod_name = obj.split("/")[-1] if "/" in obj else obj
+        key = f"{ns}/{pod_name}"
+        if key in seen:
+            continue
+        seen.add(key)
+        probe_type = "liveness" if "liveness" in line.lower() else "readiness"
+        issues.append({
+            "category": "probe",
+            "severity": "warning",
+            "resource": pod_name,
+            "namespace": ns,
+            "description": f"Pod '{pod_name}' in '{ns}' — {probe_type} probe failing",
+            "fix_command": f"kubectl delete pod {pod_name} -n {ns}",
+        })
+    return issues
+
+
+def get_tls_issues() -> list[dict]:
+    """Expired or soon-expiring TLS secrets across all namespaces."""
+    try:
+        from agent.integrations.tls_collector import collect_tls_secrets
+    except ImportError:
+        return []
+    result = collect_tls_secrets()
+    secrets = result.get("data", {}).get("secrets", [])
+    issues = []
+    for sec in secrets:
+        name = sec.get("name", "")
+        ns   = sec.get("namespace", "")
+        if sec.get("expired"):
+            days = abs(sec.get("days_left", 0))
+            issues.append({
+                "category": "tls",
+                "severity": "critical",
+                "resource": name,
+                "namespace": ns,
+                "description": f"TLS secret '{name}' in '{ns}' EXPIRED {days} day(s) ago",
+                "fix_command": f"kubectl delete secret {name} -n {ns}",
+            })
+        elif 0 < sec.get("days_left", 9999) <= 30:
+            issues.append({
+                "category": "tls",
+                "severity": "warning",
+                "resource": name,
+                "namespace": ns,
+                "description": f"TLS secret '{name}' in '{ns}' expires in {sec['days_left']} day(s)",
+                "fix_command": f"kubectl delete secret {name} -n {ns}",
+            })
+    return issues
+
+
 def get_pod_logs(pod: str, namespace: str, lines: int = 100) -> str:
     """
     Fetch current and (if crashing) previous logs for a pod.
@@ -588,6 +712,363 @@ def apply_fix(command: str) -> KubectlResult:
 
     log.info("kubectl.apply_fix", command=command)
     return run_kubectl(parts)
+
+
+# ---------------------------------------------------------------------------
+# Resource metrics helpers
+# ---------------------------------------------------------------------------
+
+def _parse_cpu_millicores(raw: str) -> int:
+    raw = raw.strip()
+    if raw.endswith("m"):
+        try:
+            return int(raw[:-1])
+        except ValueError:
+            return 0
+    try:
+        return int(float(raw) * 1000)
+    except ValueError:
+        return 0
+
+
+def _parse_memory_mebibytes(raw: str) -> int:
+    raw = raw.strip()
+    try:
+        if raw.endswith("Ki"):
+            return max(int(raw[:-2]) // 1024, 1)
+        if raw.endswith("Mi"):
+            return int(raw[:-2])
+        if raw.endswith("Gi"):
+            return int(raw[:-2]) * 1024
+        if raw.endswith("Ti"):
+            return int(raw[:-2]) * 1024 * 1024
+        if raw.endswith("K") or raw.endswith("k"):
+            return max(int(raw[:-1]) // 1024, 1)
+        if raw.endswith("M"):
+            return int(raw[:-1])
+        if raw.endswith("G"):
+            return int(raw[:-1]) * 1024
+        return max(int(raw) // (1024 * 1024), 1)
+    except ValueError:
+        return 0
+
+
+def get_node_metrics_top() -> list:
+    """
+    kubectl top nodes --no-headers
+    Output columns: NAME  CPU(cores)  CPU%  MEMORY(bytes)  MEMORY%
+    Returns list[NodeResourceMetrics].
+    """
+    from agent.core.models import NodeResourceMetrics
+
+    result = run_kubectl(["top", "nodes", "--no-headers"])
+    if not result.success:
+        err = result.error.lower()
+        if "metrics api not available" in err or "no metrics" in err or "servicenotfound" in err.lower():
+            log.warning("get_node_metrics.metrics_server_missing")
+        else:
+            log.warning("get_node_metrics.failed", error=result.error[:200])
+        return []
+
+    metrics = []
+    for line in result.output.strip().splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        name       = parts[0]
+        cpu_usage  = parts[1]
+        cpu_pct    = int(parts[2].rstrip("%")) if parts[2].rstrip("%").isdigit() else 0
+        mem_usage  = parts[3]
+        mem_pct    = int(parts[4].rstrip("%")) if parts[4].rstrip("%").isdigit() else 0
+
+        if cpu_pct >= 85 or mem_pct >= 90:
+            status = "critical"
+        elif cpu_pct >= 70 or mem_pct >= 75:
+            status = "warning"
+        else:
+            status = "healthy"
+
+        metrics.append(NodeResourceMetrics(
+            name           = name,
+            cpu_usage      = cpu_usage,
+            cpu_percent    = cpu_pct,
+            memory_usage   = mem_usage,
+            memory_percent = mem_pct,
+            status         = status,
+            pressure       = cpu_pct >= 85 or mem_pct >= 90,
+        ))
+
+    log.info("get_node_metrics.done", count=len(metrics))
+    return metrics
+
+
+def get_pod_metrics(namespace: str = "all") -> list:
+    """
+    Combines kubectl top pods (usage) + kubectl get pods -o json (limits).
+    Returns list[PodResourceMetrics] with percentages relative to limits.
+    """
+    from agent.core.models import PodResourceMetrics
+
+    # --- usage ---
+    if namespace == "all":
+        top_r = run_kubectl(["top", "pods", "-A", "--no-headers"])
+    else:
+        top_r = run_kubectl(["top", "pods", "-n", namespace, "--no-headers"])
+
+    if not top_r.success:
+        err = top_r.error.lower()
+        if "metrics api not available" in err or "no metrics" in err:
+            log.warning("get_pod_metrics.metrics_server_missing")
+        else:
+            log.warning("get_pod_metrics.top_failed", error=top_r.error[:200])
+        return []
+
+    # Parse: NAMESPACE  NAME  CPU(cores)  MEMORY(bytes)  (ns="all")
+    #  or:   NAME  CPU(cores)  MEMORY(bytes)              (ns=specific)
+    top_data: dict[tuple, dict] = {}
+    for line in top_r.output.strip().splitlines():
+        parts = line.split()
+        if namespace == "all":
+            if len(parts) < 4:
+                continue
+            ns_key, name, cpu_raw, mem_raw = parts[0], parts[1], parts[2], parts[3]
+        else:
+            if len(parts) < 3:
+                continue
+            ns_key, name, cpu_raw, mem_raw = namespace, parts[0], parts[1], parts[2]
+        top_data[(ns_key, name)] = {
+            "cpu_usage": cpu_raw,
+            "mem_usage": mem_raw,
+            "cpu_mc":    _parse_cpu_millicores(cpu_raw),
+            "mem_mb":    _parse_memory_mebibytes(mem_raw),
+        }
+
+    if not top_data:
+        return []
+
+    # --- limits ---
+    if namespace == "all":
+        lim_r = run_kubectl(["get", "pods", "-A", "-o", "json"])
+    else:
+        lim_r = run_kubectl(["get", "pods", "-n", namespace, "-o", "json"])
+
+    limits_map: dict[tuple, dict] = {}
+    if lim_r.success and lim_r.output.strip():
+        try:
+            for pod in json.loads(lim_r.output).get("items", []):
+                pns  = pod["metadata"].get("namespace", "default")
+                pnam = pod["metadata"]["name"]
+                cpu_lim_mc = mem_lim_mb = 0
+                cpu_req_mc = mem_req_mb = 0
+                cpu_lim_str = mem_lim_str = "none"
+                cpu_req_str = mem_req_str = "none"
+                has_limits = has_requests = False
+                for c in pod.get("spec", {}).get("containers", []):
+                    res  = c.get("resources", {})
+                    lims = res.get("limits", {})
+                    reqs = res.get("requests", {})
+                    if lims:
+                        has_limits = True
+                        if lims.get("cpu"):
+                            cpu_lim_mc += _parse_cpu_millicores(lims["cpu"])
+                            cpu_lim_str  = lims["cpu"]
+                        if lims.get("memory"):
+                            mem_lim_mb  += _parse_memory_mebibytes(lims["memory"])
+                            mem_lim_str  = lims["memory"]
+                    if reqs:
+                        has_requests = True
+                        if reqs.get("cpu"):
+                            cpu_req_mc += _parse_cpu_millicores(reqs["cpu"])
+                            cpu_req_str  = reqs["cpu"]
+                        if reqs.get("memory"):
+                            mem_req_mb  += _parse_memory_mebibytes(reqs["memory"])
+                            mem_req_str  = reqs["memory"]
+                limits_map[(pns, pnam)] = {
+                    "cpu_lim_mc": cpu_lim_mc, "mem_lim_mb": mem_lim_mb,
+                    "cpu_req_mc": cpu_req_mc, "mem_req_mb": mem_req_mb,
+                    "has_limits": has_limits, "has_requests": has_requests,
+                    "cpu_limit":  cpu_lim_str, "mem_limit": mem_lim_str,
+                    "cpu_request": cpu_req_str, "mem_request": mem_req_str,
+                }
+        except (json.JSONDecodeError, KeyError) as exc:
+            log.warning("get_pod_metrics.limits_parse_error", error=str(exc))
+
+    # --- build PodResourceMetrics ---
+    result_list = []
+    for (ns_key, name), usage in top_data.items():
+        lim  = limits_map.get((ns_key, name), {})
+        cpu_mc   = usage["cpu_mc"]
+        mem_mb   = usage["mem_mb"]
+        cpu_lim  = lim.get("cpu_lim_mc", 0)
+        mem_lim  = lim.get("mem_lim_mb", 0)
+        has_lim  = lim.get("has_limits", False)
+
+        cpu_pct = int(cpu_mc * 100 / cpu_lim) if cpu_lim > 0 else 0
+        mem_pct = int(mem_mb * 100 / mem_lim) if mem_lim > 0 else 0
+
+        cpu_at_risk = cpu_pct >= 70
+        mem_at_risk = mem_pct >= 75
+        no_lims     = not has_lim
+
+        if no_lims:
+            risk_type = "no_limits"
+        elif cpu_at_risk and mem_at_risk:
+            risk_type = "both"
+        elif cpu_at_risk:
+            risk_type = "cpu"
+        elif mem_at_risk:
+            risk_type = "memory"
+        else:
+            risk_type = "none"
+
+        result_list.append(PodResourceMetrics(
+            name           = name,
+            namespace      = ns_key,
+            cpu_usage      = usage["cpu_usage"],
+            cpu_percent    = min(cpu_pct, 999),
+            memory_usage   = usage["mem_usage"],
+            memory_percent = min(mem_pct, 999),
+            cpu_limit      = lim.get("cpu_limit", "none"),
+            memory_limit   = lim.get("mem_limit", "none"),
+            at_risk        = cpu_at_risk or mem_at_risk or no_lims,
+            risk_type      = risk_type,
+        ))
+
+    log.info("get_pod_metrics.done", count=len(result_list))
+    return result_list
+
+
+def get_pod_limits(pod: str, namespace: str):
+    """
+    kubectl get pod <pod> -n <namespace> -o json
+    Returns ResourceLimits with aggregated limits/requests across all containers.
+    """
+    from agent.core.models import ResourceLimits
+
+    result = run_kubectl(["get", "pod", pod, "-n", namespace, "-o", "json"])
+    if not result.success:
+        return ResourceLimits(
+            cpu_limit="none", memory_limit="none",
+            cpu_request="none", memory_request="none",
+            has_limits=False, has_requests=False,
+        )
+    try:
+        data = json.loads(result.output)
+        cpu_lims, mem_lims, cpu_reqs, mem_reqs = [], [], [], []
+        for c in data.get("spec", {}).get("containers", []):
+            res  = c.get("resources", {})
+            lims = res.get("limits", {})
+            reqs = res.get("requests", {})
+            if lims.get("cpu"):
+                cpu_lims.append(lims["cpu"])
+            if lims.get("memory"):
+                mem_lims.append(lims["memory"])
+            if reqs.get("cpu"):
+                cpu_reqs.append(reqs["cpu"])
+            if reqs.get("memory"):
+                mem_reqs.append(reqs["memory"])
+        return ResourceLimits(
+            cpu_limit    = cpu_lims[0]  if cpu_lims  else "none",
+            memory_limit = mem_lims[0]  if mem_lims  else "none",
+            cpu_request  = cpu_reqs[0]  if cpu_reqs  else "none",
+            memory_request = mem_reqs[0] if mem_reqs else "none",
+            has_limits   = bool(cpu_lims or mem_lims),
+            has_requests = bool(cpu_reqs or mem_reqs),
+        )
+    except (json.JSONDecodeError, KeyError) as exc:
+        log.warning("get_pod_limits.parse_error", pod=pod, error=str(exc))
+        return ResourceLimits(
+            cpu_limit="none", memory_limit="none",
+            cpu_request="none", memory_request="none",
+            has_limits=False, has_requests=False,
+        )
+
+
+def get_hpa_status(namespace: str = "all") -> list:
+    """
+    kubectl get hpa -A --no-headers
+    Columns: NAMESPACE NAME REFERENCE TARGETS MINPODS MAXPODS REPLICAS AGE
+    Returns list[HPAInfo].
+    """
+    from agent.core.models import HPAInfo
+
+    if namespace == "all":
+        result = run_kubectl(["get", "hpa", "-A", "--no-headers"])
+    else:
+        result = run_kubectl(["get", "hpa", "-n", namespace, "--no-headers"])
+
+    if not result.success:
+        return []
+
+    hpas = []
+    for line in result.output.strip().splitlines():
+        parts = line.split()
+        if len(parts) < 7:
+            continue
+        ns        = parts[0]
+        name      = parts[1]
+        reference = parts[2]
+        targets   = parts[3]  # e.g. "50%/80%" or "<unknown>/80%"
+        min_r     = int(parts[4]) if parts[4].isdigit() else 0
+        max_r     = int(parts[5]) if parts[5].isdigit() else 0
+        cur_r     = int(parts[6]) if parts[6].isdigit() else 0
+
+        cpu_cur = cpu_tgt = 0
+        if "/" in targets:
+            cur_s, tgt_s = targets.split("/", 1)
+            try:
+                cpu_cur = int(cur_s.rstrip("%"))
+            except ValueError:
+                pass
+            try:
+                cpu_tgt = int(tgt_s.rstrip("%"))
+            except ValueError:
+                pass
+
+        hpas.append(HPAInfo(
+            name=name, namespace=ns, target=reference,
+            min_replicas=min_r, max_replicas=max_r, current_replicas=cur_r,
+            cpu_target=cpu_tgt, cpu_current=cpu_cur,
+        ))
+
+    return hpas
+
+
+def patch_resource_limits(
+    deployment: str,
+    namespace: str,
+    cpu_limit: str,
+    memory_limit: str,
+) -> KubectlResult:
+    """
+    Patch the first container's resource limits on a deployment.
+    Only call after explicit user approval.
+    """
+    patch = json.dumps([
+        {"op": "replace",
+         "path": "/spec/template/spec/containers/0/resources/limits/memory",
+         "value": memory_limit},
+        {"op": "replace",
+         "path": "/spec/template/spec/containers/0/resources/limits/cpu",
+         "value": cpu_limit},
+    ])
+    return run_kubectl([
+        "patch", "deployment", deployment,
+        "-n", namespace,
+        "--type=json",
+        f"-p={patch}",
+    ])
+
+
+def scale_deployment(deployment: str, namespace: str, replicas: int) -> KubectlResult:
+    """
+    kubectl scale deployment — only call after explicit user approval.
+    """
+    return run_kubectl([
+        "scale", "deployment", deployment,
+        "-n", namespace,
+        f"--replicas={replicas}",
+    ])
 
 
 # ---------------------------------------------------------------------------

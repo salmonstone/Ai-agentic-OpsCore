@@ -433,11 +433,16 @@ def collect_deployments() -> dict:
             if desired == 0:
                 scaled_zero.append(label)
             elif current < desired:
-                unavailable.append(f"{label}: {current}/{desired} ready")
+                unavailable.append({
+                    "label": f"{label}: {current}/{desired} ready",
+                    "name": name, "namespace": ns,
+                    "kind": kind[:-1],  # "deployment" or "statefulset"
+                })
             else:
                 healthy.append(label)
 
-    issues = scaled_zero + unavailable
+    unavail_labels = [u["label"] for u in unavailable]
+    issues = scaled_zero + unavail_labels
     summary = (
         f"{len(healthy)} healthy, {len(scaled_zero)} scaled-to-zero, "
         f"{len(unavailable)} unavailable."
@@ -445,11 +450,12 @@ def collect_deployments() -> dict:
     if scaled_zero:
         summary += "\nScaled to zero (0 replicas):\n" + "\n".join(f"  {w}" for w in scaled_zero)
     if unavailable:
-        summary += "\nUnavailable pods:\n" + "\n".join(f"  {w}" for w in unavailable)
+        summary += "\nUnavailable pods:\n" + "\n".join(f"  {u['label']}" for u in unavailable)
 
     return _ok(summary, {
         "scaled_zero": scaled_zero,
-        "unavailable": unavailable,
+        "unavailable": unavailable,      # list of dicts with name/namespace/kind
+        "unavailable_labels": unavail_labels,
         "healthy": healthy,
         "issues": issues,
     })

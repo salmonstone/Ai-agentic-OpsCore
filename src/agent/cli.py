@@ -47,6 +47,30 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
 
+# ── First-run bootstrap ────────────────────────────────────────────────────
+# Create data/ directory structure so SQLite and vault never fail on first use.
+_DATA_DIR = Path(__file__).parent.parent.parent / "data"
+_ENV_FILE  = Path(__file__).parent.parent.parent / ".env"
+
+for _d in (_DATA_DIR, _DATA_DIR / "vault"):
+    _d.mkdir(parents=True, exist_ok=True)
+
+# Show a helpful banner if .env doesn't exist yet (first run)
+if not _ENV_FILE.exists():
+    _c = Console()
+    _c.print()
+    _c.print(Panel(
+        "[bold yellow]First run detected — no .env file found.[/bold yellow]\n\n"
+        "Run the setup wizard to configure your API keys:\n\n"
+        "  [bold cyan]agent setup[/bold cyan]\n\n"
+        "Or copy the template and edit it manually:\n\n"
+        "  [bold cyan]cp .env.example .env[/bold cyan]",
+        title="[bold]Welcome to AI Agentic OS[/bold]",
+        border_style="yellow",
+    ))
+    _c.print()
+# ──────────────────────────────────────────────────────────────────────────
+
 # ---------------------------------------------------------------------------
 # App + sub-apps
 # ---------------------------------------------------------------------------
@@ -117,6 +141,12 @@ network_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(network_app, name="network")
+
+resources_app = typer.Typer(
+    help="Resource monitor — CPU/memory usage, limit alerts, and guided fixes.",
+    no_args_is_help=True,
+)
+app.add_typer(resources_app, name="resources")
 
 console = Console()
 
@@ -605,6 +635,84 @@ def eval_k8s() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Command: agent eval resources
+# ---------------------------------------------------------------------------
+
+@eval_app.command("resources")
+def eval_resources() -> None:
+    """Run the Resource Monitor eval suite (mocked metrics, no live cluster needed)."""
+    try:
+        from evals.resources.runner import run_evals  # type: ignore[import]
+
+        console.print()
+        console.print(Rule("[bold]Resource Monitor Eval Suite[/bold]"))
+        console.print()
+
+        with console.status("[bold green]Running 8 eval cases...", spinner="dots"):
+            data = run_evals()
+
+        results = data["results"]
+        totals  = data["totals"]
+
+        table = Table(
+            title=f"Resource Eval Results  [dim]({totals['cases']} cases)[/dim]",
+            show_lines=True,
+            header_style="bold cyan",
+            border_style="dim",
+        )
+        table.add_column("ID",           width=10)
+        table.add_column("Scenario",     max_width=32, no_wrap=True)
+        table.add_column("Expected",     width=14)
+        table.add_column("Alert?",       justify="center", width=8)
+        table.add_column("Severity",     justify="center", width=10)
+        table.add_column("Fix valid?",   justify="center", width=10)
+        table.add_column("Score",        justify="right",  width=8)
+        table.add_column("Pass",         justify="center", width=6)
+
+        for r in results:
+            alert_ok = "[green]OK[/green]"  if r["alert_pass"]    else "[red]FAIL[/red]"
+            sev_ok   = "[green]OK[/green]"  if r["severity_pass"] else "[red]FAIL[/red]"
+            fix_ok   = "[green]OK[/green]"  if r["fix_pass"]      else "[yellow]N/A[/yellow]"
+            status   = (
+                "[bold green]PASS[/bold green]" if r["passed"]
+                else "[bold red]FAIL[/bold red]"
+            )
+            table.add_row(
+                r["id"],
+                r["scenario"][:30],
+                r["expected_alert_type"] or "[dim]none[/dim]",
+                alert_ok, sev_ok, fix_ok,
+                f"{r['score']}/100",
+                status,
+            )
+
+        console.print(table)
+        console.print()
+
+        n      = totals["cases"]
+        passed = totals["passed"]
+        pct    = round(passed / n * 100) if n else 0
+        color  = "green" if pct >= 80 else "yellow" if pct >= 60 else "red"
+        avg_score = round(totals["total_score"] / n) if n else 0
+
+        console.print(f"  Pass rate   : [{color}]{passed}/{n} ({pct}%)[/{color}]")
+        console.print(f"  Avg score   : [cyan]{avg_score}/100[/cyan]")
+        console.print(f"  Alert hits  : {totals['alert_hits']}/{n}")
+        console.print(f"  Severity ok : {totals['severity_hits']}/{n}")
+        console.print(f"  Fix valid   : {totals['fix_hits']}/{n}")
+        console.print()
+
+        if pct < 80:
+            raise typer.Exit(1)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Command: agent gmail jobs
 # ---------------------------------------------------------------------------
 
@@ -934,86 +1042,116 @@ def k8s_scan(
         help="Namespace to scan, or 'all' for every namespace.",
         show_default=True,
     ),
+    fix: bool = typer.Option(False, "--fix", help="Apply fix commands for each issue found."),
 ) -> None:
-    """Scan the cluster for unhealthy pods and show a summary table."""
+    """Scan the cluster for all 10 production issue types with fix commands."""
     try:
         from agent.skills.k8s import K8sSkill
+        from agent.skills._fix_runner import apply_shell_fix
 
         skill = K8sSkill()
         console.print()
 
-        with console.status("[bold cyan]Scanning cluster...", spinner="dots"):
-            diagnoses = skill.scan_cluster(namespace)
+        with console.status("[bold cyan]Scanning cluster (10 checks)...", spinner="dots"):
+            issues = skill.full_cluster_scan(namespace)
 
         console.print()
 
-        if not diagnoses:
+        if not issues:
             console.print(Panel(
-                "[bold green]All pods healthy![/bold green]  No problems detected.",
+                "[bold green]All clear![/bold green]  No issues detected across all 10 checks.",
                 border_style="green",
             ))
             console.print()
             return
 
-        # Split: scaled-to-zero deployments vs unhealthy pods
-        scaled   = [d for d in diagnoses if d.fix_command and "scale" in d.fix_command]
-        pod_issues = [d for d in diagnoses if d not in scaled]
+        _CAT_LABEL = {
+            "pod":        ("Unhealthy Pods",           "bold red"),
+            "deployment": ("Failed / Scaled-Down",     "bold red"),
+            "node":       ("Node Issues",              "bold red"),
+            "probe":      ("Probe Failures",           "bold yellow"),
+            "quota":      ("Resource Quota Exceeded",  "bold red"),
+            "tls":        ("TLS / Certificate Issues", "bold yellow"),
+        }
+        _SEV_COLOR = {"critical": "bold red", "warning": "yellow", "info": "dim"}
 
-        # ── Scaled-to-zero section ─────────────────────────────────────────
-        if scaled:
-            stbl = Table(
-                title=f"[bold red]{len(scaled)} deployment(s) scaled to zero[/bold red]",
-                show_lines=True,
-                header_style="bold red",
-                border_style="dim",
-            )
-            stbl.add_column("Deployment/StatefulSet", max_width=36, no_wrap=True)
-            stbl.add_column("Namespace", width=18)
-            stbl.add_column("Fix Command", min_width=46)
+        critical_count = sum(1 for i in issues if i["severity"] == "critical")
+        warning_count  = sum(1 for i in issues if i["severity"] == "warning")
+        console.print(Panel(
+            f"[bold red]{critical_count} critical[/bold red]  "
+            f"[yellow]{warning_count} warning[/yellow]  "
+            f"across {len(issues)} issue(s)",
+            title="[bold]Cluster Scan Results[/bold]",
+            border_style="red" if critical_count else "yellow",
+        ))
+        console.print()
 
-            for d in scaled:
-                stbl.add_row(
-                    f"[bold]{d.pod}[/bold]",
-                    d.namespace,
-                    f"[bold cyan]{_escape(d.fix_command)}[/bold cyan]",
-                )
-            console.print(stbl)
-            console.print()
+        # Group by category and render one table per category
+        from collections import defaultdict
+        by_cat: dict[str, list[dict]] = defaultdict(list)
+        for iss in issues:
+            by_cat[iss["category"]].append(iss)
 
-            if not pod_issues:
-                console.print(
-                    "  [dim]Run the fix commands above, or use[/dim] "
-                    "[bold]agent k8s scan --fix[/bold] [dim]to apply automatically.[/dim]"
-                )
-                console.print()
+        pod_issues_for_diagnose = []
+        for cat in ("pod", "deployment", "node", "probe", "quota", "tls"):
+            cat_issues = by_cat.get(cat, [])
+            if not cat_issues:
+                continue
+            label, header_color = _CAT_LABEL.get(cat, (cat.upper(), "bold"))
 
-        # ── Unhealthy pods section ─────────────────────────────────────────
-        if pod_issues:
-            table = Table(
-                title=f"[bold red]{len(pod_issues)} unhealthy pod(s)[/bold red]",
+            tbl = Table(
+                title=f"[{header_color}]{label} ({len(cat_issues)})[/{header_color}]",
                 show_lines=True,
                 header_style="bold cyan",
                 border_style="dim",
             )
-            table.add_column("Pod",        max_width=36, no_wrap=True)
-            table.add_column("Problem",    width=22)
-            table.add_column("Namespace",  width=16)
-            table.add_column("Confidence", justify="center", width=11)
+            tbl.add_column("Resource",    max_width=32, no_wrap=True)
+            tbl.add_column("Namespace",   width=16, no_wrap=True)
+            tbl.add_column("Severity",    width=10, justify="center")
+            tbl.add_column("Description", min_width=36)
+            tbl.add_column("Fix Command", min_width=40)
 
-            for d in pod_issues:
-                table.add_row(
-                    d.pod,
-                    f"[bold red]{d.problem_type.value}[/bold red]",
-                    d.namespace,
-                    _confidence_markup(d.confidence),
+            for iss in cat_issues:
+                sev_color = _SEV_COLOR.get(iss["severity"], "white")
+                tbl.add_row(
+                    f"[bold]{_escape(iss['resource'])}[/bold]",
+                    _escape(iss["namespace"] or "—"),
+                    f"[{sev_color}]{iss['severity'].upper()}[/{sev_color}]",
+                    _escape(iss["description"]),
+                    f"[cyan]{_escape(iss['fix_command'] or '—')}[/cyan]",
                 )
+                if cat == "pod" and iss.get("fix_command") and "describe" in iss["fix_command"]:
+                    pod_issues_for_diagnose.append(iss)
 
-            console.print(table)
+            console.print(tbl)
             console.print()
 
-            first = pod_issues[0]
+            # Apply fixes if --fix flag set
+            if fix:
+                fixable = [i for i in cat_issues if i.get("fix_command") and "describe" not in i["fix_command"]]
+                if fixable:
+                    console.print(f"  [bold cyan]Applying {len(fixable)} fix(es) for {label}...[/bold cyan]")
+                    for iss in fixable:
+                        console.print(f"  [dim]→[/dim] {_escape(iss['fix_command'])}")
+                        result = apply_shell_fix(iss["fix_command"])
+                        icon = "[green]✓[/green]" if result == "ok" else "[red]✗[/red]"
+                        console.print(f"  {icon} {iss['resource']}")
+                    console.print()
+
+        if pod_issues_for_diagnose and not fix:
+            first = pod_issues_for_diagnose[0]
             console.print(
-                f"  [dim]Run:[/dim] [bold]agent k8s diagnose {first.pod} -n {first.namespace}[/bold]"
+                f"  [dim]Deep-dive:[/dim] [bold]agent k8s diagnose "
+                f"{first['resource']} -n {first['namespace']}[/bold]"
+            )
+            console.print()
+
+        if not fix and any(
+            i.get("fix_command") and "describe" not in i.get("fix_command", "")
+            for i in issues
+        ):
+            console.print(
+                "  [dim]Auto-fix all:[/dim] [bold]agent k8s scan --fix[/bold]"
             )
             console.print()
 
@@ -5407,6 +5545,775 @@ def info(
             ))
             console.print()
             _cost_footer(get_session_total())
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Resources commands
+# ---------------------------------------------------------------------------
+
+@resources_app.command("scan")
+def resources_scan(
+    namespace: str = typer.Option(
+        "all", "--namespace", "-n",
+        help="Namespace to scan, or 'all'.",
+        show_default=True,
+    ),
+    show_healthy: bool = typer.Option(
+        False, "--show-healthy",
+        help="Also list healthy pods.",
+    ),
+) -> None:
+    """Scan CPU and memory for all pods and nodes. Alerts on limit approaches."""
+    try:
+        from agent.skills.resource_monitor import ResourceMonitorSkill
+        from agent.observability.costs import get_session_total
+
+        skill = ResourceMonitorSkill()
+        console.print()
+
+        with console.status("[bold cyan]Scanning resources (nodes + pods + limits)...", spinner="dots"):
+            report = skill.scan_resources(namespace)
+
+        console.print()
+
+        # Metrics-server missing — friendly guidance
+        if not report.nodes and not report.pods:
+            console.print(Panel(
+                "[yellow]No metrics returned.[/yellow]\n\n"
+                "This usually means [bold]metrics-server[/bold] is not installed.\n\n"
+                "Install it:\n"
+                "  [cyan]kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/"
+                "releases/latest/download/components.yaml[/cyan]\n\n"
+                "If you're on a self-signed / bare-metal cluster also run:\n"
+                "  [cyan]kubectl patch deployment metrics-server -n kube-system "
+                "--type=json -p='[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\","
+                "\"value\":\"--kubelet-insecure-tls\"}]'[/cyan]\n\n"
+                "Wait ~60s then re-run: [bold]agent resources scan[/bold]",
+                title="[bold yellow]metrics-server not available[/bold yellow]",
+                border_style="yellow",
+            ))
+            console.print()
+            return
+
+        # Summary panel
+        crit_color = "red" if report.critical_count else ("yellow" if report.warning_count else "green")
+        console.print(Panel(
+            f"[bold]Scanned [cyan]{len(report.nodes)}[/cyan] nodes, "
+            f"[cyan]{len(report.pods)}[/cyan] pods[/bold]\n"
+            f"[bold red]Critical alerts: {report.critical_count}[/bold red]   "
+            f"[yellow]Warnings: {report.warning_count}[/yellow]   "
+            f"[green]Healthy: {report.healthy_count}[/green]",
+            title="[bold]RESOURCE HEALTH SCAN[/bold]",
+            border_style=crit_color,
+        ))
+        console.print()
+
+        # Node table
+        if report.nodes:
+            ntbl = Table(
+                title="NODE RESOURCES",
+                show_lines=False,
+                header_style="bold cyan",
+                border_style="dim",
+            )
+            ntbl.add_column("Node",    min_width=16)
+            ntbl.add_column("CPU Used", width=12, justify="right")
+            ntbl.add_column("CPU %",    width=10, justify="right")
+            ntbl.add_column("Mem Used", width=12, justify="right")
+            ntbl.add_column("Mem %",    width=10, justify="right")
+
+            for n in sorted(report.nodes, key=lambda x: x.cpu_percent + x.memory_percent, reverse=True):
+                cc = "bold red" if n.cpu_percent >= 85 else ("yellow" if n.cpu_percent >= 70 else "green")
+                mc = "bold red" if n.memory_percent >= 90 else ("yellow" if n.memory_percent >= 75 else "green")
+                ntbl.add_row(
+                    f"[bold]{_escape(n.name)}[/bold]",
+                    n.cpu_usage,
+                    f"[{cc}]{n.cpu_percent}% {'✗' if n.cpu_percent >= 70 else '✓'}[/{cc}]",
+                    n.memory_usage,
+                    f"[{mc}]{n.memory_percent}% {'✗' if n.memory_percent >= 75 else '✓'}[/{mc}]",
+                )
+            console.print(ntbl)
+            console.print()
+
+        # Alert tables per severity
+        for sev, title, color in (
+            ("critical", "CRITICAL ALERTS (fix immediately)", "bold red"),
+            ("warning",  "WARNINGS",                          "yellow"),
+        ):
+            sev_alerts = [a for a in report.alerts if a.severity == sev]
+            if not sev_alerts:
+                continue
+
+            atbl = Table(
+                title=f"[{color}]{title}[/{color}]",
+                show_lines=True,
+                header_style="bold cyan",
+                border_style="dim",
+            )
+            atbl.add_column("Pod / Node",  max_width=30, no_wrap=True)
+            atbl.add_column("Namespace",   width=16)
+            atbl.add_column("Type",        width=12)
+            atbl.add_column("Usage",       width=14, justify="right")
+            atbl.add_column("Limit",       width=10, justify="right")
+            atbl.add_column("Recommendation", min_width=36)
+
+            for a in sev_alerts:
+                type_label = a.alert_type.replace("_", " ")
+                pct_str    = f" ({a.percent_used}%)" if a.percent_used > 0 else ""
+                if a.alert_type == "OOM_RISK":
+                    type_label = f"[bold red]OOM RISK{pct_str}[/bold red]"
+                elif a.alert_type == "NO_LIMITS":
+                    type_label = "[yellow]NO LIMIT[/yellow] ⚠"
+                elif sev == "critical":
+                    type_label = f"[bold red]{type_label}{pct_str}[/bold red]"
+                else:
+                    type_label = f"[yellow]{type_label}{pct_str}[/yellow]"
+
+                atbl.add_row(
+                    f"[bold]{_escape(a.pod_or_node)}[/bold]",
+                    _escape(a.namespace or "—"),
+                    type_label,
+                    _escape(a.current_usage),
+                    _escape(a.limit),
+                    _escape(a.recommendation),
+                )
+            console.print(atbl)
+            console.print()
+
+        # Pods without limits warning
+        if report.pods_without_limits:
+            console.print(
+                f"  [yellow]⚠  {len(report.pods_without_limits)} pod(s) have no resource limits:[/yellow]"
+            )
+            for name in report.pods_without_limits[:10]:
+                console.print(f"    [dim]{name}[/dim]")
+            if len(report.pods_without_limits) > 10:
+                console.print(f"    [dim]... and {len(report.pods_without_limits) - 10} more[/dim]")
+            console.print()
+
+        # HPA status if any critical
+        if report.critical_count > 0:
+            from agent.integrations.kubectl import get_hpa_status
+            with console.status("[dim]Checking HPA...[/dim]", spinner="dots"):
+                hpas = get_hpa_status(namespace)
+            if hpas:
+                htbl = Table(
+                    title="HPA STATUS",
+                    show_lines=False,
+                    header_style="bold cyan",
+                    border_style="dim",
+                )
+                htbl.add_column("Name",      max_width=28)
+                htbl.add_column("Namespace", width=16)
+                htbl.add_column("Target",    width=22)
+                htbl.add_column("Replicas",  width=16, justify="center")
+                htbl.add_column("CPU Cur/Target", width=18, justify="center")
+                for h in hpas:
+                    color = "red" if h.cpu_current >= 85 else ("yellow" if h.cpu_current >= 70 else "green")
+                    htbl.add_row(
+                        _escape(h.name), _escape(h.namespace), _escape(h.target),
+                        f"{h.current_replicas}/{h.max_replicas}",
+                        f"[{color}]{h.cpu_current}%[/{color}]/{h.cpu_target}%",
+                    )
+                console.print(htbl)
+                console.print()
+
+        # Claude AI analysis
+        if report.claude_analysis:
+            console.print(Panel(
+                _escape(report.claude_analysis),
+                title="[bold magenta]AI ANALYSIS[/bold magenta]",
+                border_style="magenta",
+                padding=(0, 1),
+            ))
+            console.print()
+
+        # Healthy pods (optional)
+        if show_healthy:
+            healthy_pods = [p for p in report.pods if not p.at_risk]
+            if healthy_pods:
+                console.print(f"  [dim]{len(healthy_pods)} healthy pod(s) — all within limits.[/dim]")
+                console.print()
+
+        # Fix hints
+        hints = []
+        if report.critical_count > 0:
+            hints.append("  [bold]agent resources fix --all-critical[/bold]       [dim]fix high CPU/memory[/dim]")
+        if report.pods_without_limits:
+            hints.append("  [bold]agent resources fix --fix-limits[/bold]         [dim]add limits to all pods that have none[/dim]")
+        hints.append(    "  [bold]agent resources fix --scale-down[/bold]         [dim]suggest replica reduction for idle deployments[/dim]")
+        hints.append(    "  [bold]agent resources fix --all[/bold]                [dim]do everything above at once[/dim]")
+        if hints:
+            console.print(Rule("[dim]FIX COMMANDS[/dim]"))
+            for h in hints:
+                console.print(h)
+            console.print()
+
+        _cost_footer(get_session_total())
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@resources_app.command("fix")
+def resources_fix(
+    pod: Optional[str] = typer.Option(None, "--pod", help="Pod name to fix."),
+    namespace: str = typer.Option(
+        "all", "--namespace", "-n", help="Namespace of the pod (or 'all').",
+        show_default=True,
+    ),
+    all_critical: bool = typer.Option(
+        False, "--all-critical", help="Fix all critical resource issues.",
+    ),
+    fix_limits: bool = typer.Option(
+        False, "--fix-limits", help="Add limits to every pod that has none.",
+    ),
+    scale_down: bool = typer.Option(
+        False, "--scale-down", help="Suggest scale-down for over-replicated low-usage deployments.",
+    ),
+    all_issues: bool = typer.Option(
+        False, "--all", help="Handle all issues: critical, no-limits, and scale-down suggestions.",
+    ),
+) -> None:
+    """Fix resource issues interactively — always asks [y/N] before applying."""
+    import subprocess as _sp
+    import time as _time
+
+    try:
+        from agent.integrations.kubectl import (
+            _parse_cpu_millicores, _parse_memory_mebibytes,
+            get_deployment_for_pod, get_pod_limits, get_pod_metrics,
+        )
+        from agent.skills.resource_monitor import ResourceMonitorSkill, _bump_memory
+        from agent.skills._fix_runner import apply_shell_fix
+
+        skill = ResourceMonitorSkill()
+
+        # ------------------------------------------------------------------
+        # Helper: get current replica count for a deployment
+        # ------------------------------------------------------------------
+        def _get_replicas(dep_name: str, ns: str) -> int:
+            r = _sp.run(
+                ["kubectl", "get", "deployment", dep_name, "-n", ns,
+                 "--no-headers",
+                 "-o", "custom-columns=DESIRED:.spec.replicas,READY:.status.readyReplicas"],
+                capture_output=True, text=True, timeout=15,
+            )
+            parts = r.stdout.strip().split()
+            try:
+                return int(parts[0])
+            except Exception:
+                return 1
+
+        # ------------------------------------------------------------------
+        # Helper: compute suggested limits from actual usage
+        # ------------------------------------------------------------------
+        def _suggest_limits(cpu_raw: str, mem_raw: str):
+            cpu_mc  = _parse_cpu_millicores(cpu_raw)
+            mem_mb  = _parse_memory_mebibytes(mem_raw)
+            # limit = 2× usage, rounded, with minimums
+            cpu_lim = max(((cpu_mc * 2 + 99) // 100) * 100, 200)
+            mem_lim = max(((mem_mb * 2 + 63) // 64) * 64, 128)
+            cpu_req = max(cpu_lim // 4, 50)
+            mem_req = max(mem_lim // 4, 32)
+            mem_lim_str = f"{mem_lim // 1024}Gi" if mem_lim >= 1024 else f"{mem_lim}Mi"
+            mem_req_str = f"{mem_req // 1024}Gi" if mem_req >= 1024 else f"{mem_req}Mi"
+            return f"{cpu_lim}m", mem_lim_str, f"{cpu_req}m", mem_req_str
+
+        # ------------------------------------------------------------------
+        # Fix: add limits to a no-limits pod
+        # ------------------------------------------------------------------
+        def _fix_no_limits(pod_m, owner_name: str | None) -> None:
+            ns = pod_m.namespace
+            cpu_lim, mem_lim, cpu_req, mem_req = _suggest_limits(
+                pod_m.cpu_usage, pod_m.memory_usage
+            )
+            target = f"deployment/{owner_name}" if owner_name else f"pod/{pod_m.name}"
+            cmd = (
+                f"kubectl set resources {target} -n {ns} "
+                f"--limits=cpu={cpu_lim},memory={mem_lim} "
+                f"--requests=cpu={cpu_req},memory={mem_req}"
+            )
+            console.print(Panel(
+                f"  [bold]Problem:[/bold]  No resource limits — pod can starve others\n"
+                f"  [bold]Current:[/bold]  CPU {pod_m.cpu_usage}  MEM {pod_m.memory_usage}\n\n"
+                f"  [bold]PROPOSED LIMITS[/bold]  (2× current usage)\n"
+                f"  CPU limit:    [yellow]none[/yellow] → [green]{cpu_lim}[/green]\n"
+                f"  Memory limit: [yellow]none[/yellow] → [green]{mem_lim}[/green]\n"
+                f"  CPU request:  none → {cpu_req}\n"
+                f"  Memory req:   none → {mem_req}\n\n"
+                f"  [bold]COMMAND[/bold]\n  {cmd}",
+                title=f"[cyan]NO LIMITS: {pod_m.name}[/cyan]",
+                border_style="yellow",
+            ))
+            if not typer.confirm("  Apply this fix?", default=False):
+                console.print("  [dim]Skipped.[/dim]\n")
+                return
+            if not owner_name:
+                console.print("  [yellow]Cannot set resources on a bare pod — edit the deployment YAML manually.[/yellow]\n")
+                return
+            res = apply_shell_fix(cmd)
+            icon = "[green]✓[/green]" if res == "ok" else "[red]✗[/red]"
+            console.print(f"  {icon} {res}\n")
+
+        # ------------------------------------------------------------------
+        # Fix: increase memory limit for high-memory pod
+        # ------------------------------------------------------------------
+        def _fix_high_memory(pod_m, limits, owner_name: str | None) -> None:
+            ns      = pod_m.namespace
+            factor  = 1.5 if pod_m.memory_percent >= 90 else 1.25
+            new_mem = _bump_memory(limits.memory_limit, factor)
+            pct_tag = "+50%" if factor == 1.5 else "+25%"
+            risk    = "OOMKill imminent" if pod_m.memory_percent >= 90 else "memory warning"
+            target  = f"deployment/{owner_name}" if owner_name else f"pod/{pod_m.name}"
+            cmd     = f"kubectl set resources {target} -n {ns} --limits=memory={new_mem}"
+            console.print(Panel(
+                f"  [bold]Problem:[/bold]  Memory at {pod_m.memory_percent}% "
+                f"({pod_m.memory_usage} / {limits.memory_limit})\n"
+                f"  [bold]Risk:[/bold]     {risk}\n\n"
+                f"  [bold]PROPOSED CHANGE[/bold]\n"
+                f"  Memory limit: [yellow]{limits.memory_limit}[/yellow] → [green]{new_mem}[/green] ({pct_tag})\n\n"
+                f"  [bold]COMMAND[/bold]\n  {cmd}",
+                title=f"[red]MEM HIGH: {pod_m.name}[/red]",
+                border_style="red",
+            ))
+            if not typer.confirm("  Apply this fix?", default=False):
+                console.print("  [dim]Skipped.[/dim]\n")
+                return
+            if not owner_name:
+                console.print("  [yellow]Cannot determine owner — apply manually.[/yellow]\n")
+                return
+            res = apply_shell_fix(cmd)
+            if res == "ok":
+                console.print("  [bold green]✓ Applied.[/bold green]  Waiting 10s for rollout...")
+                _time.sleep(10)
+                new_pods = get_pod_metrics(ns)
+                new_m    = next((p for p in new_pods if p.name == pod_m.name), None)
+                if new_m:
+                    ok = new_m.memory_percent < 75
+                    console.print(
+                        f"  Memory: {new_m.memory_usage} / {new_mem} ({new_m.memory_percent}%) "
+                        + ("[green]✓[/green]" if ok else "[yellow]still high[/yellow]")
+                    )
+            else:
+                console.print("  [bold red]✗ Fix failed.[/bold red]")
+            console.print()
+
+        # ------------------------------------------------------------------
+        # Fix: scale up for high-CPU pod
+        # ------------------------------------------------------------------
+        def _fix_high_cpu(pod_m, limits, owner_name: str | None) -> None:
+            ns       = pod_m.namespace
+            cur_reps = _get_replicas(owner_name, ns) if owner_name else 1
+            new_reps = cur_reps + 1
+            target   = f"deployment/{owner_name}" if owner_name else pod_m.name
+            cmd      = f"kubectl scale {target} -n {ns} --replicas={new_reps}"
+            console.print(Panel(
+                f"  [bold]Problem:[/bold]  CPU at {pod_m.cpu_percent}% "
+                f"({pod_m.cpu_usage} / {limits.cpu_limit})\n"
+                f"  [bold]Risk:[/bold]     CPU throttling\n\n"
+                f"  [bold]PROPOSED CHANGE[/bold]\n"
+                f"  Scale: [yellow]{cur_reps}[/yellow] → [green]{new_reps}[/green] replicas\n\n"
+                f"  [bold]COMMAND[/bold]\n  {cmd}",
+                title=f"[red]CPU HIGH: {pod_m.name}[/red]",
+                border_style="red",
+            ))
+            if not typer.confirm("  Apply this fix?", default=False):
+                console.print("  [dim]Skipped.[/dim]\n")
+                return
+            if not owner_name:
+                console.print("  [yellow]Cannot determine deployment — apply manually.[/yellow]\n")
+                return
+            res  = apply_shell_fix(cmd)
+            icon = "[green]✓[/green]" if res == "ok" else "[red]✗[/red]"
+            console.print(f"  {icon} {res}\n")
+
+        # ------------------------------------------------------------------
+        # Suggestion: scale down over-replicated low-usage deployments
+        # ------------------------------------------------------------------
+        def _suggest_scale_downs(pods_metrics, scan_ns: str) -> None:
+            import json as _json
+
+            # get all deployments with replica counts
+            r = _sp.run(
+                ["kubectl", "get", "deployments", "-A", "--no-headers",
+                 "-o", "custom-columns="
+                 "NS:.metadata.namespace,NAME:.metadata.name,"
+                 "DESIRED:.spec.replicas,READY:.status.readyReplicas"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode != 0:
+                return
+
+            suggested = 0
+            for line in r.stdout.strip().splitlines():
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                dep_ns, dep_name = parts[0], parts[1]
+                try:
+                    desired = int(parts[2])
+                except ValueError:
+                    continue
+                if desired < 2:
+                    continue  # already single replica
+                if scan_ns != "all" and dep_ns != scan_ns:
+                    continue
+
+                # find pods belonging to this deployment in metrics
+                dep_pods = [
+                    p for p in pods_metrics
+                    if p.namespace == dep_ns and dep_name in p.name
+                ]
+                if not dep_pods:
+                    continue
+
+                avg_cpu = sum(p.cpu_percent for p in dep_pods) / len(dep_pods)
+                avg_mem = sum(p.memory_percent for p in dep_pods) / len(dep_pods)
+
+                # Only suggest scale-down if both metrics comfortably below thresholds
+                if avg_cpu < 20 and avg_mem < 40:
+                    suggested += 1
+                    new_reps = desired - 1
+                    console.print(Panel(
+                        f"  [bold]Deployment:[/bold]  {dep_name}  [{dep_ns}]\n"
+                        f"  [bold]Replicas:[/bold]    {desired} running\n"
+                        f"  [bold]Avg usage:[/bold]   CPU {avg_cpu:.0f}%  MEM {avg_mem:.0f}%  "
+                        f"[dim](well below thresholds)[/dim]\n\n"
+                        f"  [bold]PROPOSED CHANGE[/bold]\n"
+                        f"  Scale: [yellow]{desired}[/yellow] → [green]{new_reps}[/green] replicas  "
+                        f"[dim](saves ~{100 // desired}% of resources)[/dim]\n\n"
+                        f"  [bold]COMMAND[/bold]\n"
+                        f"  kubectl scale deployment/{dep_name} -n {dep_ns} --replicas={new_reps}",
+                        title=f"[dim]SCALE DOWN SUGGESTION: {dep_name}[/dim]",
+                        border_style="dim",
+                    ))
+                    if typer.confirm("  Scale this down?", default=False):
+                        cmd = f"kubectl scale deployment/{dep_name} -n {dep_ns} --replicas={new_reps}"
+                        res  = apply_shell_fix(cmd)
+                        icon = "[green]✓[/green]" if res == "ok" else "[red]✗[/red]"
+                        console.print(f"  {icon} {res}")
+                    else:
+                        console.print("  [dim]Skipped.[/dim]")
+                    console.print()
+
+            if suggested == 0:
+                console.print("  [dim]No over-replicated low-usage deployments found.[/dim]\n")
+
+        # ------------------------------------------------------------------
+        # Dispatch
+        # ------------------------------------------------------------------
+        run_all      = all_issues
+        run_critical = all_critical or run_all
+        run_limits   = fix_limits   or run_all
+        run_scale    = scale_down   or run_all
+
+        if not any([pod, run_critical, run_limits, run_scale]):
+            console.print(
+                "[yellow]Nothing to do. Use one of:[/yellow]\n"
+                "  [bold]--pod <name> -n <ns>[/bold]          fix a specific pod\n"
+                "  [bold]--all-critical[/bold]                fix all critical resource alerts\n"
+                "  [bold]--fix-limits[/bold]                  add limits to all pods that have none\n"
+                "  [bold]--scale-down[/bold]                  suggest replica reduction for idle deployments\n"
+                "  [bold]--all[/bold]                         do all of the above"
+            )
+            raise typer.Exit(1)
+
+        console.print()
+        scan_ns = namespace
+
+        with console.status("[bold cyan]Scanning resources...", spinner="dots"):
+            report      = skill.scan_resources(scan_ns)
+            all_pod_met = report.pods
+
+        # ── 1. Critical alerts (high memory / high CPU) ────────────────────
+        if run_critical:
+            critical = [
+                a for a in report.alerts
+                if a.severity == "critical" and a.namespace and a.pod_or_node
+            ]
+            if critical:
+                console.print(Rule(f"[bold red]CRITICAL ISSUES ({len(critical)})[/bold red]"))
+                console.print()
+                for alert in critical:
+                    pod_m = next(
+                        (p for p in all_pod_met
+                         if p.name == alert.pod_or_node and p.namespace == alert.namespace),
+                        None,
+                    )
+                    if not pod_m:
+                        continue
+                    _, owner_name = get_deployment_for_pod(alert.pod_or_node, alert.namespace)
+                    limits = get_pod_limits(alert.pod_or_node, alert.namespace)
+                    if alert.alert_type in ("OOM_RISK", "MEM_HIGH"):
+                        _fix_high_memory(pod_m, limits, owner_name)
+                    elif alert.alert_type == "CPU_HIGH":
+                        _fix_high_cpu(pod_m, limits, owner_name)
+            else:
+                console.print("[green]No critical resource alerts.[/green]\n")
+
+        # ── 2. No-limits pods ──────────────────────────────────────────────
+        if run_limits:
+            no_lim_pods = [p for p in all_pod_met if p.risk_type == "no_limits"]
+            if no_lim_pods:
+                console.print(Rule(f"[yellow]PODS WITHOUT LIMITS ({len(no_lim_pods)})[/yellow]"))
+                console.print()
+                for pod_m in no_lim_pods:
+                    if scan_ns != "all" and pod_m.namespace != scan_ns:
+                        continue
+                    _, owner_name = get_deployment_for_pod(pod_m.name, pod_m.namespace)
+                    _fix_no_limits(pod_m, owner_name)
+            else:
+                console.print("[green]All pods have resource limits set.[/green]\n")
+
+        # ── 3. Scale-down suggestions ──────────────────────────────────────
+        if run_scale:
+            console.print(Rule("[dim]SCALE-DOWN SUGGESTIONS[/dim]"))
+            console.print()
+            _suggest_scale_downs(all_pod_met, scan_ns)
+
+        # ── 4. Single pod fix ──────────────────────────────────────────────
+        if pod:
+            ns    = namespace if namespace != "all" else "default"
+            pod_m = next((p for p in all_pod_met if p.name == pod), None)
+            if not pod_m:
+                # pod not in metrics — try loading limits directly
+                limits = get_pod_limits(pod, ns)
+                console.print(f"  [yellow]{pod} has no live metrics — checking limits...[/yellow]")
+                if not limits.has_limits:
+                    console.print(f"  [yellow]No limits set on {pod}.[/yellow]")
+                return
+            _, owner_name = get_deployment_for_pod(pod, pod_m.namespace)
+            limits        = get_pod_limits(pod, pod_m.namespace)
+
+            if pod_m.memory_percent >= 75:
+                _fix_high_memory(pod_m, limits, owner_name)
+            elif pod_m.cpu_percent >= 85:
+                _fix_high_cpu(pod_m, limits, owner_name)
+            elif pod_m.risk_type == "no_limits":
+                _fix_no_limits(pod_m, owner_name)
+            else:
+                console.print(
+                    f"  [green]{pod}: CPU {pod_m.cpu_percent}%  MEM {pod_m.memory_percent}% — no fix needed.[/green]"
+                )
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@resources_app.command("watch")
+def resources_watch(
+    namespace: str = typer.Option(
+        "all", "--namespace", "-n",
+        help="Namespace to monitor.",
+        show_default=True,
+    ),
+    interval: int = typer.Option(
+        30, "--interval",
+        help="Refresh interval in seconds.",
+        show_default=True,
+    ),
+    alert_only: bool = typer.Option(
+        False, "--alert-only",
+        help="Only print output when an alert is triggered.",
+    ),
+) -> None:
+    """Live resource monitor — updates every --interval seconds. Ctrl+C to stop."""
+    try:
+        from agent.skills.resource_monitor import ResourceMonitorSkill
+
+        skill = ResourceMonitorSkill()
+        console.print()
+        skill.watch_resources(
+            namespace=namespace,
+            interval=interval,
+            alert_only=alert_only,
+            console=console,
+        )
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@resources_app.command("history")
+def resources_history(
+    last: str = typer.Option("24h", "--last", help="Time window (e.g. 24h, 7d)."),
+) -> None:
+    """Show resource usage history from saved memory snapshots."""
+    try:
+        from agent.memory.retrieval import get_memories_by_source
+
+        memories = get_memories_by_source("resource-monitor") + \
+                   get_memories_by_source("resource-snapshot")
+
+        if not memories:
+            console.print(Panel(
+                "[dim]No resource history found yet.\n"
+                "Run [bold]agent resources scan[/bold] or "
+                "[bold]agent resources watch[/bold] to start collecting.[/dim]",
+                border_style="dim",
+            ))
+            return
+
+        console.print()
+        tbl = Table(
+            title="[bold]Resource History[/bold]",
+            show_lines=True,
+            header_style="bold cyan",
+            border_style="dim",
+        )
+        tbl.add_column("Time",    width=20)
+        tbl.add_column("Source",  width=18)
+        tbl.add_column("Summary", min_width=50)
+
+        for m in sorted(memories, key=lambda x: x.created_at, reverse=True)[:50]:
+            tbl.add_row(
+                m.created_at.strftime("%Y-%m-%d %H:%M"),
+                _escape(m.source),
+                _escape(m.content[:100]),
+            )
+
+        console.print(tbl)
+        console.print()
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@resources_app.command("report")
+def resources_report(
+    namespace: str = typer.Option(
+        "all", "--namespace", "-n",
+        help="Namespace to report on.",
+        show_default=True,
+    ),
+) -> None:
+    """Full resource report — all pods sorted by usage, no-limit offenders, recommendations."""
+    try:
+        from agent.skills.resource_monitor import ResourceMonitorSkill
+        from agent.observability.costs import get_session_total
+
+        skill = ResourceMonitorSkill()
+        console.print()
+
+        with console.status("[bold cyan]Building full resource report...", spinner="dots"):
+            report = skill.scan_resources(namespace)
+
+        console.print()
+        console.print(Rule("[bold]FULL RESOURCE REPORT[/bold]"))
+        console.print()
+
+        # All pods sorted by memory usage descending
+        all_pods = sorted(
+            report.pods,
+            key=lambda p: p.memory_percent if p.memory_percent > 0 else (
+                999 if p.risk_type == "no_limits" else 0
+            ),
+            reverse=True,
+        )
+
+        ptbl = Table(
+            title=f"ALL PODS ({len(all_pods)} total)",
+            show_lines=False,
+            header_style="bold cyan",
+            border_style="dim",
+        )
+        ptbl.add_column("Pod",       max_width=32, no_wrap=True)
+        ptbl.add_column("Namespace", width=16)
+        ptbl.add_column("CPU",       width=14, justify="right")
+        ptbl.add_column("Memory",    width=14, justify="right")
+        ptbl.add_column("Risk",      width=14)
+
+        for p in all_pods:
+            cpu_str = (
+                f"{p.cpu_usage} ({p.cpu_percent}% of {p.cpu_limit})"
+                if p.cpu_limit != "none"
+                else f"{p.cpu_usage}"
+            )
+            mem_str = (
+                f"{p.memory_usage} ({p.memory_percent}% of {p.memory_limit})"
+                if p.memory_limit != "none"
+                else f"{p.memory_usage}"
+            )
+            if p.risk_type == "no_limits":
+                risk_str = "[yellow]NO LIMITS ⚠[/yellow]"
+            elif p.risk_type in ("memory", "both"):
+                risk_str = (
+                    "[bold red]OOM RISK[/bold red]"
+                    if p.memory_percent >= 90
+                    else "[yellow]MEM HIGH[/yellow]"
+                )
+            elif p.risk_type == "cpu":
+                risk_str = "[yellow]CPU HIGH[/yellow]"
+            else:
+                risk_str = "[green]OK[/green]"
+
+            ptbl.add_row(
+                f"[bold]{_escape(p.name)}[/bold]",
+                _escape(p.namespace),
+                _escape(cpu_str),
+                _escape(mem_str),
+                risk_str,
+            )
+
+        console.print(ptbl)
+        console.print()
+
+        # Pods without limits
+        if report.pods_without_limits:
+            console.print(Panel(
+                "[yellow]PODS WITHOUT RESOURCE LIMITS[/yellow]\n\n"
+                + "\n".join(f"  {_escape(n)}" for n in report.pods_without_limits),
+                title="[yellow]Dangerous — can cause node OOMKill[/yellow]",
+                border_style="yellow",
+            ))
+            console.print()
+
+        # Recommendations sorted by severity
+        if report.alerts:
+            console.print(Rule("[bold]RECOMMENDATIONS (by priority)[/bold]"))
+            console.print()
+            critical = [a for a in report.alerts if a.severity == "critical"]
+            warnings = [a for a in report.alerts if a.severity == "warning"]
+            for i, alert in enumerate(critical + warnings, 1):
+                col = "bold red" if alert.severity == "critical" else "yellow"
+                console.print(
+                    f"  [dim]{i:02d}.[/dim] [{col}]{alert.severity.upper()}[/{col}]"
+                    f"  [bold]{_escape(alert.pod_or_node)}[/bold]"
+                    + (f" [{alert.namespace}]" if alert.namespace else "")
+                )
+                console.print(f"       {_escape(alert.recommendation)}")
+                console.print()
+
+        # AI analysis
+        if report.claude_analysis:
+            console.print(Panel(
+                _escape(report.claude_analysis),
+                title="[bold magenta]AI ANALYSIS[/bold magenta]",
+                border_style="magenta",
+                padding=(0, 1),
+            ))
+            console.print()
+
+        _cost_footer(get_session_total())
 
     except typer.Exit:
         raise

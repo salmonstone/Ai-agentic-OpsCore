@@ -35,6 +35,12 @@ _JSON_SYSTEM_SUFFIX = (
 def _get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
+        if not settings.anthropic_api_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set.\n"
+                "Run 'agent setup' to configure it, or add it to your .env file.\n"
+                "Get a key at: https://console.anthropic.com/settings/keys"
+            )
         _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     return _client
 

@@ -7,9 +7,13 @@ from agent.core.parsing import LLMParseError, parse_llm_json
 from agent.integrations.kubectl import (
     apply_fix as kubectl_apply_fix,
     describe_pod,
+    get_node_issues,
     get_pod_events,
     get_pod_logs,
+    get_probe_failures,
     get_problematic_pods,
+    get_quota_issues,
+    get_tls_issues,
 )
 from agent.memory.retrieval import remember, retrieve_context
 from agent.observability.logging import get_logger
@@ -157,6 +161,108 @@ class K8sSkill(BaseSkill):
             for pod in pods
         ]
         return diagnoses
+
+    def full_cluster_scan(self, namespace: str = "all") -> list[dict]:
+        """
+        Comprehensive scan covering all 10 production issue categories.
+        Returns a list of issue dicts with: category, severity, resource,
+        namespace, description, fix_command.
+
+        Categories:
+          pod        — CrashLoopBackOff, OOMKilled, ImagePullBackOff,
+                       Pending, ConfigMap/Secret missing  (items 1-4, 7)
+          deployment — scaled-to-zero, unavailable/failed rollout   (items 5)
+          node       — NotReady nodes                                (item 8)
+          probe      — liveness/readiness probe failures             (item 9)
+          quota      — ResourceQuota exceeded                        (item 10)
+          tls        — expired / expiring-soon certs                 (item 6)
+        """
+        from agent.integrations.collectors import collect_deployments
+
+        issues: list[dict] = []
+
+        # ── 1-4, 7: Unhealthy pods (CrashLoop, OOM, ImagePull, Pending, ConfigError)
+        pods = get_problematic_pods()
+        if namespace != "all":
+            pods = [p for p in pods if p.namespace == namespace]
+        for pod in pods:
+            fix = None
+            sev = "critical" if pod.status in {
+                "CrashLoopBackOff", "OOMKilled", "Error",
+                "ImagePullBackOff", "ErrImagePull",
+            } else "warning"
+            if pod.status in ("CrashLoopBackOff", "OOMKilled", "Error"):
+                fix = f"kubectl delete pod {pod.name} -n {pod.namespace}"
+            elif pod.status in ("ImagePullBackOff", "ErrImagePull"):
+                fix = f"kubectl describe pod {pod.name} -n {pod.namespace}"
+            elif pod.status in ("CreateContainerConfigError", "CreateContainerError"):
+                fix = f"kubectl describe pod {pod.name} -n {pod.namespace}"
+            issues.append({
+                "category": "pod",
+                "severity": sev,
+                "resource": pod.name,
+                "namespace": pod.namespace,
+                "description": f"{pod.status} — {pod.restarts} restart(s)",
+                "fix_command": fix,
+            })
+
+        # ── 5: Failed / scaled-to-zero deployments
+        dep = collect_deployments()
+        dep_data = dep.get("data", {})
+        for label in dep_data.get("scaled_zero", []):
+            try:
+                ns_name, kind_raw = label.rsplit(" ", 1)
+                ns, name = ns_name.split("/", 1)
+                kind = "statefulset" if "statefulset" in kind_raw else "deployment"
+            except ValueError:
+                continue
+            if namespace != "all" and ns != namespace:
+                continue
+            issues.append({
+                "category": "deployment",
+                "severity": "warning",
+                "resource": name,
+                "namespace": ns,
+                "description": f"{kind.capitalize()} scaled to 0 replicas — no pods running",
+                "fix_command": f"kubectl scale {kind} {name} -n {ns} --replicas=1",
+            })
+        for u in dep_data.get("unavailable", []):
+            if namespace != "all" and u["namespace"] != namespace:
+                continue
+            issues.append({
+                "category": "deployment",
+                "severity": "critical",
+                "resource": u["name"],
+                "namespace": u["namespace"],
+                "description": f"{u['kind'].capitalize()} '{u['name']}' has unavailable pods — rollout may be stuck or failing",
+                "fix_command": f"kubectl rollout undo {u['kind']}/{u['name']} -n {u['namespace']}",
+            })
+
+        # ── 8: Node NotReady
+        for issue in get_node_issues():
+            issues.append(issue)
+
+        # ── 9: Liveness/readiness probe failures
+        for issue in get_probe_failures():
+            if namespace == "all" or issue["namespace"] == namespace:
+                issues.append(issue)
+
+        # ── 10: Resource quota exceeded
+        for issue in get_quota_issues():
+            if namespace == "all" or issue["namespace"] == namespace:
+                issues.append(issue)
+
+        # ── 6: TLS expired / expiring
+        for issue in get_tls_issues():
+            issues.append(issue)
+
+        log.info(
+            "k8s.full_cluster_scan",
+            total=len(issues),
+            critical=sum(1 for i in issues if i["severity"] == "critical"),
+            warning=sum(1 for i in issues if i["severity"] == "warning"),
+        )
+        return issues
 
     def diagnose_pod(self, pod: PodInfo) -> PodDiagnosis:
         logs        = get_pod_logs(pod.name, pod.namespace)

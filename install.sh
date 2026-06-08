@@ -113,6 +113,20 @@ uv pip install -e .
 echo
 ok "Installation complete"
 
+# ── 5. Create data directory ──────────────────────────────────────────────────
+
+mkdir -p data/vault
+ok "data/ directory ready"
+
+# ── 5b. Bootstrap .env from example if not present ───────────────────────────
+
+if [ ! -f ".env" ] && [ -f ".env.example" ]; then
+    cp .env.example .env
+    ok ".env created from .env.example — add your ANTHROPIC_API_KEY before running"
+elif [ ! -f ".env" ]; then
+    warn ".env not found — run 'agent setup' or copy .env.example to .env"
+fi
+
 # ── 5. Verify agent CLI ───────────────────────────────────────────────────────
 
 if ! command -v agent &>/dev/null; then

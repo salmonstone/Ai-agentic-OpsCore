@@ -11,7 +11,7 @@ from pathlib import Path
 from agent.config import settings
 from agent.core.models import Memory
 from agent.memory.embeddings import add_embedding, search_similar
-from agent.memory.store import get_recent, save_memory
+from agent.memory.store import get_by_source, get_recent, save_memory
 from agent.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -44,6 +44,11 @@ def remember(
 
     log.info("memory.retrieval.remembered", id=memory.id, source=source)
     return memory
+
+
+def get_memories_by_source(source: str) -> list[Memory]:
+    """Return all memories saved with the given source tag, newest first."""
+    return get_by_source(source)
 
 
 def retrieve_context(query: str, limit: int = 5) -> list[Memory]:
