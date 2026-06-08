@@ -11,6 +11,15 @@ Commands:
 """
 from __future__ import annotations
 
+# Must be set before numpy/OpenBLAS loads — prevents OOM crash on Windows
+# where the paging file is too small for OpenBLAS multi-threaded allocations.
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_MAIN_FREE", "1")
+os.environ.setdefault("GOTO_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 import json
 import sys
 import time
