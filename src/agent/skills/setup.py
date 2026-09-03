@@ -467,7 +467,7 @@ class SetupWizard:
     # ── 3. Gmail ─────────────────────────────────────────────────────────────
 
     def configure_gmail(self) -> None:
-        _section("Step 3 — Gmail")
+        _section("Step 3 — Gmail (optional)")
 
         if not _confirm("Connect Gmail?", default=False):
             console.print(f"  {_SKIP} Gmail skipped")
@@ -511,12 +511,204 @@ class SetupWizard:
             console.print("  [dim]You can retry later with: agent gmail list[/dim]")
             self._record("Gmail", False, str(exc)[:60])
 
-    # ── 4. Custom integrations ────────────────────────────────────────────────
+    # ── 4. Slack alerting ─────────────────────────────────────────────────────
+
+    def configure_slack(self) -> None:
+        _section("Step 4 — Slack Alerts")
+        console.print("  Get Slack alerts when pods crash, resources spike, or security issues appear.\n")
+
+        if not _confirm("Enable Slack alerts?", default=False):
+            console.print(f"  {_SKIP} Slack skipped")
+            return
+
+        console.print("""
+  To create a Slack webhook:
+  1. Go to https://api.slack.com/apps  → Create App → Incoming Webhooks
+  2. Enable Incoming Webhooks
+  3. Add New Webhook to Workspace → pick a channel
+  4. Copy the Webhook URL (starts with https://hooks.slack.com/…)
+""")
+
+        webhook = _ask("Slack Webhook URL (https://hooks.slack.com/…)", password=True)
+        if not webhook:
+            console.print(f"  {_SKIP} Slack skipped — no webhook provided")
+            return
+
+        _set_env("SLACK_WEBHOOK_URL", webhook)
+        _set_env("SLACK_ENABLED", "true")
+
+        default_ch  = _ask("Default alert channel", default="#alerts")
+        critical_ch = _ask("Critical incidents channel", default="#incidents")
+        _set_env("SLACK_DEFAULT_CHANNEL",  default_ch)
+        _set_env("SLACK_CRITICAL_CHANNEL", critical_ch)
+
+        # Test immediately
+        console.print()
+        with console.status("  Testing webhook…"):
+            try:
+                import os, httpx
+                from datetime import datetime, timezone
+                payload = {
+                    "text": "✅ InfraGPT connected to Slack!",
+                    "blocks": [{
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "✅ *InfraGPT Slack integration working!*\n"
+                                f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+                                "_You'll receive alerts here when pods crash, resources spike, or security issues are found._"
+                            ),
+                        },
+                    }],
+                }
+                r = httpx.post(webhook, json=payload, timeout=8)
+                ok = r.status_code == 200
+                detail = "test message sent" if ok else f"HTTP {r.status_code}"
+            except Exception as exc:
+                ok = False
+                detail = str(exc)[:120]
+
+        icon = _OK if ok else _FAIL
+        console.print(f"  {icon} Slack: {detail}")
+        self._record("Slack Alerts", ok, detail)
+
+    # ── 5. GitHub Webhook ────────────────────────────────────────────────────
+
+    def configure_github_webhooks(self) -> None:
+        _section("Step 5 — GitHub Webhook Deployments")
+        console.print(
+            "  Auto-deploy when you push to GitHub — each push triggers an\n"
+            "  AI safety analysis and Slack approval before deploying.\n"
+        )
+
+        if not _confirm("Configure GitHub webhook deployments?", default=False):
+            console.print(f"  {_SKIP} GitHub webhooks skipped")
+            return
+
+        # ── Step 5a: Generate webhook secret ──────────────────────────────
+        import secrets as _secrets
+        webhook_secret = _secrets.token_hex(16)  # 32 hex chars
+        _set_env("GITHUB_WEBHOOK_SECRET", webhook_secret)
+
+        console.print()
+        console.print(Panel(
+            f"[bold yellow]Webhook secret (save this — shown once):[/bold yellow]\n\n"
+            f"  [bold cyan]{webhook_secret}[/bold cyan]\n\n"
+            "[dim]Saved to .env as GITHUB_WEBHOOK_SECRET[/dim]",
+            border_style="yellow",
+            padding=(1, 2),
+        ))
+        console.print()
+
+        # ── Step 5b: Collect mappings ──────────────────────────────────────
+        console.print(
+            "  Add your GitHub repos and their Kubernetes deployments.\n"
+            "  Each push to a mapped repo triggers an AI deployment approval via Slack.\n"
+        )
+
+        from agent.core.models import WebhookMapping, WebhookConfig
+        from agent.integrations.mapping_loader import MappingLoader
+
+        loader   = MappingLoader()
+        mappings: list[WebhookMapping] = []
+
+        while True:
+            console.print(Rule("[dim]Add mapping[/dim]"))
+
+            repo = _ask("GitHub repo (e.g. username/repo-name)")
+            if not repo:
+                break
+            if "/" not in repo:
+                console.print(f"  {_WARN} Repo must be in 'owner/name' format")
+                continue
+
+            branch      = _ask("Branch to watch", default="main")
+            deployment  = _ask("Kubernetes deployment name")
+            namespace   = _ask("Kubernetes namespace", default="default")
+            image_prefix = _ask(
+                "Image prefix (ECR URL without tag,\n"
+                "    e.g. 123456.dkr.ecr.us-east-1.amazonaws.com/app)",
+                default="",
+            )
+            auto_approve = _confirm("Auto-approve LOW risk deploys?", default=False)
+
+            # Validate
+            console.print()
+            mapping = WebhookMapping(
+                repo                  = repo,
+                branch                = branch,
+                deployment            = deployment,
+                namespace             = namespace,
+                image_prefix          = image_prefix,
+                auto_approve_low_risk = auto_approve,
+            )
+
+            with console.status("  Validating against cluster…"):
+                result = loader.validate_mapping(mapping)
+
+            if result.valid:
+                console.print(f"  {_OK} Cluster validation passed")
+            else:
+                for err in result.errors:
+                    console.print(f"  {_WARN} {err}")
+                if not _confirm("  Save mapping anyway?", default=True):
+                    console.print("  [dim]Mapping discarded.[/dim]")
+                    console.print()
+                    if not _confirm("Add another repo?", default=False):
+                        break
+                    continue
+
+            loader.add_mapping(mapping)
+            mappings.append(mapping)
+            console.print(
+                f"  {_OK} Mapping saved: "
+                f"[cyan]{repo}:{branch}[/cyan] → "
+                f"[green]{deployment}/{namespace}[/green]"
+            )
+            console.print()
+
+            if not _confirm("Add another repo?", default=False):
+                break
+
+        if not mappings:
+            console.print(f"  {_SKIP} No mappings configured")
+            self._record("GitHub Webhooks", False, "no mappings")
+            return
+
+        # ── Step 5c: Show instructions panel ──────────────────────────────
+        repos_list = "\n".join(
+            f"  •  github.com/{m.repo}/settings/hooks" for m in mappings
+        )
+        console.print()
+        console.print(Panel(
+            "[bold]GITHUB WEBHOOK SETUP[/bold]\n\n"
+            "For EACH GitHub repo you mapped, do this:\n\n"
+            "  1. Go to the repo → Settings → Webhooks\n"
+            f"{repos_list}\n\n"
+            "  2. Click [bold]Add webhook[/bold]\n"
+            "  3. [bold]Payload URL:[/bold]\n"
+            "       http://YOUR-SERVER-IP:8080/webhook/github\n"
+            "  4. [bold]Content type:[/bold] application/json\n"
+            f"  5. [bold]Secret:[/bold] {webhook_secret}\n"
+            "  6. [bold]Events:[/bold] Just the push event\n"
+            "  7. Click [bold]Add webhook[/bold]\n\n"
+            "Then start the listener:\n"
+            "  [bold cyan]agent deploy webhook-start --port 8080[/bold cyan]",
+            title="[bold green]Next Steps[/bold green]",
+            border_style="green",
+            padding=(1, 2),
+        ))
+        console.print()
+
+        self._record("GitHub Webhooks", True, f"{len(mappings)} mapping(s) saved")
+
+    # ── 6. Custom integrations ────────────────────────────────────────────────
 
     def configure_custom(self) -> None:
-        _section("Step 4 — Custom Integrations")
+        _section("Step 6 — Custom Integrations")
 
-        if not _confirm("Add any other API integrations? (GitHub, Slack, Jira, etc.)", default=False):
+        if not _confirm("Add any other API integrations? (GitHub, Jira, etc.)", default=False):
             console.print(f"  {_SKIP} No custom integrations")
             return
 
@@ -543,10 +735,10 @@ class SetupWizard:
             self._record(name, True, "key saved")
             console.print()
 
-    # ── 5. Default settings ───────────────────────────────────────────────────
+    # ── 7. Default settings ───────────────────────────────────────────────────
 
     def configure_defaults(self) -> None:
-        _section("Step 5 — Default Settings")
+        _section("Step 7 — Default Settings")
 
         model = _ask(
             "Default AI model",
@@ -634,6 +826,8 @@ class SetupWizard:
             self.configure_llm()
             self.configure_aws()
             self.configure_gmail()
+            self.configure_slack()
+            self.configure_github_webhooks()
             self.configure_custom()
             self.configure_defaults()
         except KeyboardInterrupt:

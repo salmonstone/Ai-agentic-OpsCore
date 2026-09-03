@@ -29,6 +29,27 @@ from agent.skills.base import BaseSkill
 
 log = get_logger(__name__)
 
+# AWS/K8s managed components — can't set limits, don't alert on NO_LIMITS
+_SYSTEM_NAMESPACES: frozenset[str] = frozenset({
+    "kube-system", "kube-public", "kube-node-lease",
+    "cert-manager", "ingress-nginx", "amazon-cloudwatch",
+    "aws-load-balancer-controller", "cluster-autoscaler",
+    "external-dns",
+})
+
+_SYSTEM_NAME_PREFIXES: tuple[str, ...] = (
+    "aws-node", "kube-proxy", "coredns", "ebs-csi",
+    "aws-eks-nodeagent", "node-driver-registrar", "liveness-probe",
+)
+
+
+def _is_system_component(name: str, namespace: str) -> bool:
+    """Return True for AWS/K8s managed pods that can't have limits set."""
+    if namespace in _SYSTEM_NAMESPACES:
+        return any(name.startswith(p) for p in _SYSTEM_NAME_PREFIXES)
+    return False
+
+
 # Default thresholds — overridden by config if loaded
 _CPU_WARN = 70
 _CPU_CRIT = 85
@@ -107,7 +128,8 @@ class ResourceMonitorSkill(BaseSkill):
 
         no_limits = [
             f"{p.namespace}/{p.name}"
-            for p in pods if p.risk_type == "no_limits"
+            for p in pods
+            if p.risk_type == "no_limits" and not _is_system_component(p.name, p.namespace)
         ]
 
         report = ResourceReport(
@@ -203,12 +225,42 @@ class ResourceMonitorSkill(BaseSkill):
             from rich.console import Console
             console = Console()
 
+        from agent.integrations.slack import (
+            is_configured as slack_ok,
+            send_alert as slack_send,
+            send_recovery as slack_recover,
+            send_watch_started,
+        )
+
+        try:
+            from agent.config import settings
+            alert_warnings  = settings.slack_alert_on_warning
+            alert_recovery  = settings.slack_alert_on_recovery
+            cpu_warn = settings.resource_cpu_warning
+            cpu_crit = settings.resource_cpu_critical
+            mem_warn = settings.resource_mem_warning
+            mem_crit = settings.resource_mem_critical
+        except Exception:
+            alert_warnings = False
+            alert_recovery = True
+            cpu_warn, cpu_crit, mem_warn, mem_crit = _CPU_WARN, _CPU_CRIT, _MEM_WARN, _MEM_CRIT
+
+        slack_enabled = slack_ok()
         prev_critical: set[str] = set()
         snapshot_timer = 0
 
-        console.print(
-            f"  [dim]Watching resources every {interval}s — Ctrl+C to stop[/dim]\n"
+        slack_status = (
+            "[green]Slack alerts: ON[/green]"
+            if slack_enabled else
+            "[dim]Slack alerts: off (set SLACK_WEBHOOK_URL in .env to enable)[/dim]"
         )
+        console.print(
+            f"  [dim]Watching resources every {interval}s — Ctrl+C to stop[/dim]  "
+            + slack_status + "\n"
+        )
+
+        if slack_enabled:
+            send_watch_started(namespace, interval)
 
         try:
             while True:
@@ -216,7 +268,7 @@ class ResourceMonitorSkill(BaseSkill):
                     nodes  = get_node_metrics_top()
                     pods   = get_pod_metrics(namespace)
                     alerts = self._generate_alerts(
-                        nodes, pods, _CPU_WARN, _CPU_CRIT, _MEM_WARN, _MEM_CRIT
+                        nodes, pods, cpu_warn, cpu_crit, mem_warn, mem_crit
                     )
                 except Exception as exc:
                     console.print(f"[red]Error collecting metrics: {exc}[/red]")
@@ -225,23 +277,55 @@ class ResourceMonitorSkill(BaseSkill):
 
                 if not alert_only:
                     console.clear()
-                    _render_watch_display(console, nodes, pods, alerts, interval)
+                    _render_watch_display(console, nodes, pods, alerts, interval, slack_enabled)
 
+                # Build maps for new-alert detection
                 current_critical = {
                     f"{a.pod_or_node}/{a.namespace}"
                     for a in alerts if a.severity == "critical"
                 }
+                alert_map = {
+                    f"{a.pod_or_node}/{a.namespace}": a
+                    for a in alerts
+                }
+
+                # New critical alerts — print + send Slack
                 for key in current_critical - prev_critical:
                     console.print(
-                        f"[bold red blink][NEW ALERT][/bold red blink] "
+                        f"[bold red][NEW CRITICAL][/bold red] "
                         f"{key} crossed critical threshold!"
                     )
-                    msg = next(
-                        (a.recommendation for a in alerts
-                         if f"{a.pod_or_node}/{a.namespace}" == key), ""
-                    )
-                    if msg:
-                        console.print(f"  [dim]{msg}[/dim]")
+                    alert = alert_map.get(key)
+                    if alert:
+                        console.print(f"  [dim]{alert.recommendation}[/dim]")
+                        if slack_enabled:
+                            sent = slack_send(alert)
+                            console.print(
+                                f"  [green]Slack: alert sent[/green]"
+                                if sent else
+                                f"  [yellow]Slack: send failed[/yellow]"
+                            )
+
+                # Warnings (if enabled)
+                if slack_enabled and alert_warnings:
+                    current_warnings = {
+                        f"{a.pod_or_node}/{a.namespace}"
+                        for a in alerts if a.severity == "warning"
+                    }
+                    for key in current_warnings - prev_critical:
+                        alert = alert_map.get(key)
+                        if alert:
+                            slack_send(alert)
+
+                # Resolved alerts — notify Slack
+                if slack_enabled and alert_recovery:
+                    for key in prev_critical - current_critical:
+                        parts = key.split("/", 1)
+                        pod, ns = (parts[0], parts[1]) if len(parts) == 2 else (key, "")
+                        sent = slack_recover(pod, ns)
+                        if sent:
+                            console.print(f"  [green]Slack: resolved alert sent for {key}[/green]")
+
                 prev_critical = current_critical
 
                 snapshot_timer += interval
@@ -354,8 +438,10 @@ class ResourceMonitorSkill(BaseSkill):
 
         # Pod alerts
         for pod in pods:
-            # No limits — always flag
+            # No limits — skip AWS/K8s managed system components (can't set limits on them)
             if pod.risk_type == "no_limits":
+                if _is_system_component(pod.name, pod.namespace):
+                    continue
                 alerts.append(ResourceAlert(
                     pod_or_node   = pod.name,
                     namespace     = pod.namespace,
@@ -484,6 +570,7 @@ def _render_watch_display(
     pods:    list[PodResourceMetrics],
     alerts:  list[ResourceAlert],
     interval: int,
+    slack_enabled: bool = False,
 ) -> None:
     from rich.table import Table
 
@@ -539,4 +626,8 @@ def _render_watch_display(
         console.print("[green]All pods healthy.[/green]")
 
     console.print()
-    console.print("  [dim]Ctrl+C to stop watching[/dim]")
+    slack_line = (
+        "[green]Slack: ON[/green]" if slack_enabled
+        else "[dim]Slack: off — set SLACK_WEBHOOK_URL in .env[/dim]"
+    )
+    console.print(f"  [dim]Ctrl+C to stop[/dim]  {slack_line}")

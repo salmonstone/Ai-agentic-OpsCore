@@ -1,0 +1,119 @@
+# AtlasOS built-in runbooks
+# Edit this file to customize runbooks or add your own.
+# Trigger: daemon calls run_runbook(id, context) when condition matches.
+#
+# Step types:
+#   kubectl  — runs a kubectl command (template vars from context)
+#   slack    — sends a Slack message
+#   python   — calls a built-in Python helper function
+#
+# on_failure options: continue | escalate | stop
+
+runbooks:
+  - id: disk-full
+    name: "Disk Full Recovery"
+    description: "When PVC is almost full: clean images, expand PVC, alert team"
+    trigger_condition: "pvc_usage_pct > 85"
+    steps:
+      - name: alert_start
+        type: slack
+        message: "Disk full recovery started for {namespace}/{pvc_name} ({usage_pct}% used)"
+        severity: warning
+
+      - name: clean_docker_images
+        type: kubectl
+        command: "exec {pod_name} -n {namespace} -- docker image prune -f"
+        on_failure: continue
+
+      - name: expand_pvc
+        type: python
+        function: expand_pvc
+        args:
+          pvc_name: "{pvc_name}"
+          namespace: "{namespace}"
+          add_gb: "10"
+        on_failure: escalate
+
+      - name: verify_space
+        type: kubectl
+        command: "exec {pod_name} -n {namespace} -- df -h /"
+        on_failure: continue
+
+      - name: alert_done
+        type: slack
+        message: "Disk full recovery complete for {namespace}/{pvc_name}"
+        severity: info
+
+  - id: high-memory
+    name: "High Memory Recovery"
+    description: "Pod memory > 90%: restart deployment, then verify"
+    trigger_condition: "memory_pct > 90"
+    steps:
+      - name: alert_start
+        type: slack
+        message: "High memory recovery for {namespace}/{pod_name} ({memory_pct}% used)"
+        severity: warning
+
+      - name: restart_pod
+        type: kubectl
+        command: "rollout restart deployment/{deployment_name} -n {namespace}"
+        on_failure: escalate
+
+      - name: wait_ready
+        type: python
+        function: wait_deployment_ready
+        args:
+          deployment: "{deployment_name}"
+          namespace: "{namespace}"
+          timeout_s: "120"
+        on_failure: escalate
+
+      - name: alert_done
+        type: slack
+        message: "High memory recovery complete for {namespace}/{deployment_name}"
+        severity: info
+
+  - id: node-not-ready
+    name: "Node Not Ready Response"
+    description: "When a node goes NotReady: cordon, drain safely, alert"
+    trigger_condition: "node_status == NotReady"
+    steps:
+      - name: alert_start
+        type: slack
+        message: "Node {node_name} is NotReady — starting recovery"
+        severity: critical
+
+      - name: cordon_node
+        type: kubectl
+        command: "cordon {node_name}"
+        on_failure: escalate
+
+      - name: drain_node
+        type: kubectl
+        command: "drain {node_name} --ignore-daemonsets --delete-emptydir-data --force --timeout=120s"
+        on_failure: continue
+
+      - name: alert_team
+        type: slack
+        message: "Node {node_name} cordoned and drained. Manual inspection required."
+        severity: critical
+
+  - id: image-pull-fail
+    name: "Image Pull Failure Response"
+    description: "ImagePullBackOff: alert with registry fix instructions"
+    trigger_condition: "pod_reason == ImagePullBackOff"
+    steps:
+      - name: alert_start
+        type: slack
+        message: "ImagePullBackOff: {namespace}/{pod_name} cannot pull {image}"
+        severity: warning
+
+      - name: describe_pod
+        type: kubectl
+        command: "describe pod {pod_name} -n {namespace}"
+        on_failure: continue
+
+      - name: alert_fix
+        type: slack
+        message: "Fix: verify image name/tag and registry credentials. Run: kubectl create secret docker-registry regcred --docker-server=<registry> -n {namespace}"
+        severity: info

@@ -7,6 +7,9 @@ from agent.core.parsing import LLMParseError, parse_llm_json
 from agent.integrations.kubectl import (
     apply_fix as kubectl_apply_fix,
     describe_pod,
+    get_all_pod_logs_errors,
+    get_cluster_events,
+    get_helm_releases,
     get_node_issues,
     get_pod_events,
     get_pod_logs,
@@ -256,6 +259,19 @@ class K8sSkill(BaseSkill):
         for issue in get_tls_issues():
             issues.append(issue)
 
+        # ── 11: Helm releases not in deployed state
+        for rel in get_helm_releases():
+            if not rel["healthy"]:
+                sev = "critical" if rel["status"] == "failed" else "warning"
+                issues.append({
+                    "category":    "helm",
+                    "severity":    sev,
+                    "resource":    rel["name"],
+                    "namespace":   rel["namespace"],
+                    "description": f"Helm release status: {rel['status'].upper()} — chart: {rel['chart']}",
+                    "fix_command": rel["fix_command"],
+                })
+
         log.info(
             "k8s.full_cluster_scan",
             total=len(issues),
@@ -347,6 +363,78 @@ class K8sSkill(BaseSkill):
         )
 
         return diagnosis
+
+    def analyze_logs(self, namespace: str = "all", pod: str | None = None) -> list[dict]:
+        """
+        Fetch pod logs + cluster events, filter for errors, run AI analysis.
+        Returns list of dicts: pod, namespace, errors, events, ai_analysis, fix_command, severity.
+        """
+        if pod:
+            from agent.integrations.kubectl import get_pods
+            pods = [p for p in get_pods(namespace) if p.name == pod or p.name.startswith(pod)]
+            pod_errors = []
+            for p in pods[:1]:
+                from agent.integrations.kubectl import _fetch_pod_errors
+                err = _fetch_pod_errors(p, tail=100)
+                if err:
+                    pod_errors.append(err)
+        else:
+            pod_errors = get_all_pod_logs_errors(namespace, tail=50)
+
+        events = get_cluster_events(namespace)
+
+        results: list[dict] = []
+        for pod_err in pod_errors:
+            ai_analysis = ""
+            fix_command = None
+
+            try:
+                prompt = (
+                    f"Pod: {pod_err['namespace']}/{pod_err['pod']}\n"
+                    f"Status: {pod_err['status']}\n\n"
+                    f"Error lines from logs:\n{pod_err['raw_sample']}\n\n"
+                    "Identify the root cause in one sentence and provide "
+                    "a single kubectl fix command. Return JSON: "
+                    '{"root_cause": "...", "fix_command": "kubectl ..."}'
+                )
+                resp = run_sync(llm.chat(
+                    messages=[context.user_message(prompt)],
+                    system="You are a Kubernetes SRE. Analyse pod errors and return JSON only.",
+                    json_mode=True,
+                    max_tokens=256,
+                ))
+                from agent.core.parsing import parse_llm_json
+                parsed = parse_llm_json(resp.content)
+                ai_analysis = parsed.get("root_cause", "")
+                fix_command = parsed.get("fix_command")
+            except Exception as exc:
+                log.warning("k8s.analyze_logs.ai_failed", pod=pod_err["pod"], error=str(exc))
+                ai_analysis = "AI analysis unavailable"
+
+            sev = "critical" if pod_err["status"] in (
+                "CrashLoopBackOff", "OOMKilled", "Error"
+            ) else "warning"
+
+            results.append({
+                "pod":         pod_err["pod"],
+                "namespace":   pod_err["namespace"],
+                "status":      pod_err["status"],
+                "error_lines": pod_err["error_lines"],
+                "ai_analysis": ai_analysis,
+                "fix_command": fix_command,
+                "severity":    sev,
+            })
+
+            remember(
+                content=(
+                    f"Log analysis {pod_err['namespace']}/{pod_err['pod']}: "
+                    f"{ai_analysis}. Fix: {fix_command}"
+                ),
+                source="k8s-logs",
+                metadata={"pod": pod_err["pod"], "namespace": pod_err["namespace"], "severity": sev},
+            )
+
+        return results, events
 
     def apply_fix(self, diagnosis: PodDiagnosis) -> bool:
         if not diagnosis.fix_command:
