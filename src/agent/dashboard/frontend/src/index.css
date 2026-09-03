@@ -1,0 +1,9 @@
+/* All components use inline styles — no Tailwind classes needed */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #080808; color: #e8e8e8; font-family: 'Courier New', monospace; font-size: 15px; }
+#root { width: 100%; min-height: 100vh; display: flex; flex-direction: column; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #0e0e0e; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #e05020; }
+button { font-family: 'Courier New', monospace; }
