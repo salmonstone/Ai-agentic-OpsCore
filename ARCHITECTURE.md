@@ -5,6 +5,7 @@
 AI Agentic OS is a **command-driven AI operations platform**. Every `agent <command>` call follows the same path: CLI → Skill → Integrations (data) + LLM (reasoning) → Memory (history) → Rich output.
 
 ```
+
 ┌─────────────────────────────────────────────────────────────────┐
 │                        USER TERMINAL                            │
 │                   agent k8s full-scan --fix                     │

@@ -4,6 +4,8 @@ An AI-powered command-line operations platform. Manage Kubernetes clusters, AWS 
 
 → **[Architecture & Design Decisions](ARCHITECTURE.md)**
 
+> **New:** Run **`agent about`** for full, always-current architecture documentation — it scans the live project (every file, skill, eval suite, and runtime state) and explains how it all connects. Add `--no-claude` for an instant offline overview or `--json` for a machine-readable snapshot.
+
 ## Quick Install
 
 ```bash
@@ -104,6 +106,16 @@ agent eval run              # Run all AI skill evaluations
 agent setup                 # Re-run the setup wizard at any time
 ```
 
+### About / Documentation
+
+```bash
+agent about                 # Full architecture explanation from a live scan
+agent about --no-claude     # Instant overview, no API call
+agent about --section skills   # Just one section (skills, commands, status, …)
+agent about --json > scan.json # Machine-readable project snapshot
+agent commands              # List every command with descriptions
+```
+
 ## Requirements
 
 | Tool | Minimum Version | Purpose |
@@ -137,7 +149,7 @@ src/agent/
 ├── config.py           # Pydantic settings from .env
 ├── core/               # LLM client — single entrypoint for Claude
 ├── integrations/       # Raw data: kubectl, AWS boto3, TLS, DNS, network
-├── skills/             # AI-powered operations (14 skills)
+├── skills/             # AI-powered operations (23 skills — see `agent about`)
 ├── memory/             # SQLite + ChromaDB + Vault markdown
 └── observability/      # Structured logging + cost tracking
 ```
