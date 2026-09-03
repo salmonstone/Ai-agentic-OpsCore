@@ -1,0 +1,6 @@
+{"id":"rb-01","name":"disk_full_runbook","description":"Run disk-full runbook with all steps succeeding — status=success","expected":{"status":"success"}}
+{"id":"rb-02","name":"step_failure_continue","description":"kubectl step fails with on_failure=continue — status=partial, continues","expected":{"status":"partial"}}
+{"id":"rb-03","name":"step_failure_escalate","description":"kubectl step fails with on_failure=escalate — status=failed, stops, Slack sent","expected":{"status":"failed","escalated":true}}
+{"id":"rb-04","name":"template_resolution","description":"Context {pod_name}=test-pod resolved in kubectl command","expected":{"command_contains":"test-pod"}}
+{"id":"rb-05","name":"unknown_runbook","description":"run_runbook('nonexistent') returns error without crashing","expected":{"success":false}}
+{"id":"rb-06","name":"list_runbooks","description":"list_runbooks() returns at least 3 built-in runbooks","expected":{"count_ge":3}}

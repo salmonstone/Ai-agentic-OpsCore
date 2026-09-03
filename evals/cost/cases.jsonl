@@ -1,0 +1,12 @@
+{"id":"cost-01","name":"idle_ebs_volumes","description":"Account with 3 unattached EBS volumes","expected":{"finds_idle_volumes":true,"volume_count":3,"total_waste_gt":10}}
+{"id":"cost-02","name":"gp2_upgrade","description":"Account with gp2 volumes should recommend gp3","expected":{"finds_gp2_volumes":true,"recommends_gp3":true}}
+{"id":"cost-03","name":"log_retention","description":"Log groups with no retention policy found","expected":{"finds_no_retention":true,"group_count_ge":1}}
+{"id":"cost-04","name":"ec2_rightsize","description":"EC2 with low CPU average gets rightsizing recommendation","expected":{"finds_rightsizing":true}}
+{"id":"cost-05","name":"clean_account","description":"Clean account with no waste produces no false positives","expected":{"total_waste_lt":1}}
+{"id":"cost-06","name":"unused_eips","description":"Unused Elastic IPs found and flagged","expected":{"finds_unused_eips":true,"eip_count_ge":1}}
+{"id":"cost-07","name":"old_ecr_images","description":"Old untagged ECR images found","expected":{"finds_old_ecr":true}}
+{"id":"cost-08","name":"permission_denied","description":"All checks but missing permissions — graceful degradation","expected":{"no_crash":true,"completes":true}}
+{"id":"cost-09","name":"spend_anomaly_detected","description":"Day with 2x normal spend flagged as anomaly","expected":{"finds_anomaly":true,"anomaly_count_ge":1}}
+{"id":"cost-10","name":"no_anomalies_clean","description":"Steady spend — no false positive anomalies","expected":{"anomaly_count":0}}
+{"id":"cost-11","name":"savings_plan_modeling","description":"On-demand EC2 spend → SP recommendation generated","expected":{"has_sp_recommendation":true,"max_savings_gt":0}}
+{"id":"cost-12","name":"tag_analysis","description":"Untagged spend identified and quantified","expected":{"finds_untagged":true,"untagged_pct_gt":0}}

@@ -1,0 +1,10 @@
+{"id": "mc-001", "scenario": "Detect production environment from context name", "context_name": "prod-us-east-1", "expected_environment": "production"}
+{"id": "mc-002", "scenario": "Detect staging environment from context name", "context_name": "staging-us-east-1", "expected_environment": "staging"}
+{"id": "mc-003", "scenario": "Detect development environment from context name", "context_name": "dev-local", "expected_environment": "development"}
+{"id": "mc-004", "scenario": "Detect AWS provider from EKS context name", "context_name": "arn:aws:eks:us-east-1:123456789:cluster/my-cluster", "expected_provider": "aws"}
+{"id": "mc-005", "scenario": "Detect GCP provider from GKE context name", "context_name": "gke_my-project_us-central1_my-cluster", "expected_provider": "gcp"}
+{"id": "mc-006", "scenario": "Detect local provider from minikube context name", "context_name": "minikube", "expected_provider": "local"}
+{"id": "mc-007", "scenario": "Detect region from EKS context", "context_name": "eks-cluster-ap-south-1-prod", "expected_region": "ap-south-1"}
+{"id": "mc-008", "scenario": "Broadcast blocks write commands", "command": "delete pods -A", "expected_blocked": true}
+{"id": "mc-009", "scenario": "Broadcast allows get commands", "command": "get pods -A", "expected_blocked": false}
+{"id": "mc-010", "scenario": "Score calculation: 100 - 15 for one critical", "findings_severity": ["critical"], "expected_score": 85}

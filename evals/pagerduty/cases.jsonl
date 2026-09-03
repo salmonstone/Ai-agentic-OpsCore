@@ -1,0 +1,6 @@
+{"id":"pg-01","name":"pagerduty_page_success","description":"PD routing key configured, HTTP 202 → page_oncall returns success","expected":{"provider":"pagerduty","success":true}}
+{"id":"pg-02","name":"pagerduty_page_fail","description":"PD routing key configured, HTTP 400 → page_oncall returns failure","expected":{"provider":"pagerduty","success":false}}
+{"id":"pg-03","name":"opsgenie_page_success","description":"OG key configured (no PD key), HTTP 202 → page_oncall uses opsgenie","expected":{"provider":"opsgenie","success":true}}
+{"id":"pg-04","name":"no_provider_configured","description":"No keys → page_oncall returns skipped=true without HTTP call","expected":{"skipped":true,"success":false}}
+{"id":"pg-05","name":"pagerduty_resolve","description":"PD key configured, resolve returns True on HTTP 202","expected":{"resolved":true}}
+{"id":"pg-06","name":"healer_escalation_pages","description":"Healer escalates after 3 fixes → page_oncall is called","expected":{"page_called":true}}

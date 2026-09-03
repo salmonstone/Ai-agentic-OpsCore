@@ -1,0 +1,6 @@
+{"id":"sc-01","name":"schedule_down","description":"17:30 UTC time matches down_time -> scale to down_replicas=1","expected":{"action":"schedule_down","new_replicas":1}}
+{"id":"sc-02","name":"schedule_up","description":"03:30 UTC time matches up_time -> scale to up_replicas=3","expected":{"action":"schedule_up","new_replicas":3}}
+{"id":"sc-03","name":"no_action_wrong_time","description":"Current time does not match any schedule -> no_action","expected":{"action":"no_action"}}
+{"id":"sc-04","name":"already_at_target","description":"Scale down triggered but already at 1 replica -> no kubectl call","expected":{"action":"no_action","reason":"already_at_target"}}
+{"id":"sc-05","name":"cpu_scale_up","description":"CPU at 90%, 2 replicas -> scale to 3","expected":{"action":"cpu_scale_up","new_replicas":3}}
+{"id":"sc-06","name":"cpu_at_max","description":"CPU at 90% but already at max_replicas=10 -> no_action","expected":{"action":"no_action","reason":"already_at_max"}}

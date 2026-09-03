@@ -1,0 +1,6 @@
+{"id":"slo-01","name":"create_slo","description":"Create SLO with 99.9% target - budget calculated correctly","expected":{"allowed_min":43.2,"status":"healthy"}}
+{"id":"slo-02","name":"budget_warning","description":"50% budget burned -> warning status","expected":{"status":"warning","pct_remaining_lt":51}}
+{"id":"slo-03","name":"budget_critical","description":"80% budget burned -> critical status + deploy blocked","expected":{"status":"critical","deploy_blocked":true}}
+{"id":"slo-04","name":"budget_exhausted","description":"100% budget burned -> exhausted + deploy blocked","expected":{"status":"exhausted","deploy_blocked":true}}
+{"id":"slo-05","name":"burn_tracking","description":"Incident opens -> burn starts -> incident resolves -> burn ends","expected":{"burn_recorded":true,"budget_reduced":true}}
+{"id":"slo-06","name":"no_slo_no_block","description":"Service with no SLO defined - deploy never blocked","expected":{"deploy_blocked":false}}

@@ -1,0 +1,6 @@
+{"id":"db-01","name":"healthy_instance","description":"Instance with all metrics in range -> status healthy","expected":{"status":"healthy","issues":0}}
+{"id":"db-02","name":"high_cpu","description":"CPU at 90% -> HIGH_CPU issue detected","expected":{"issue_type":"HIGH_CPU","severity":"critical"}}
+{"id":"db-03","name":"low_storage","description":"Only 2GB free -> LOW_STORAGE critical issue","expected":{"issue_type":"LOW_STORAGE","severity":"critical"}}
+{"id":"db-04","name":"high_connections","description":"Connection count high -> HIGH_CONNECTIONS warning","expected":{"issue_type":"HIGH_CONNECTIONS","severity":"warning"}}
+{"id":"db-05","name":"replica_lag","description":"Replica 90s behind -> REPLICA_LAG warning","expected":{"issue_type":"REPLICA_LAG","severity":"warning"}}
+{"id":"db-06","name":"access_denied","description":"AccessDenied on all boto3 calls -> returns empty gracefully","expected":{"no_crash":true,"instances":0}}

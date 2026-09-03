@@ -1,0 +1,8 @@
+{"id":"dmn-01","name":"detect_crashloop","description":"Pod in CrashLoopBackOff detected and heal attempted","expected":{"detected":true,"action":"heal_crashloop"}}
+{"id":"dmn-02","name":"detect_oom","description":"OOMKilled pod — memory limit increased 25%","expected":{"detected":true,"action":"heal_oom","limit_increased":true}}
+{"id":"dmn-03","name":"cooldown_respected","description":"Same pod crash within 30 min — skip re-fix","expected":{"skipped":true}}
+{"id":"dmn-04","name":"escalate_after_3_fixes","description":"Pod fixed 3 times today — escalate to Slack instead of fixing","expected":{"escalated":true,"action":"slack_alert"}}
+{"id":"dmn-05","name":"high_cpu_autoscale","description":"3 consecutive high CPU readings — scale up by 1 replica","expected":{"scaled":true,"replicas_increased":true}}
+{"id":"dmn-06","name":"bad_deploy_rollback","description":"Recent deploy has 4+ restarting pods — auto-rollback triggered","expected":{"rolled_back":true}}
+{"id":"dmn-07","name":"imagepull_alert_only","description":"ImagePullBackOff sends Slack alert but does not auto-fix","expected":{"action":"slack_alert","alerted":true}}
+{"id":"dmn-08","name":"kube_system_grace","description":"kube-system pod broken < 10 min — skip healing","expected":{"skipped":true}}

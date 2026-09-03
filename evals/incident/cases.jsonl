@@ -1,0 +1,6 @@
+{"id":"inc-01","name":"open_new_incident","description":"First crash opens a new incident","expected":{"incident_created":true}}
+{"id":"inc-02","name":"dedup_existing","description":"Second crash on same pod adds to existing incident, not new one","expected":{"incident_created":false,"event_added":true}}
+{"id":"inc-03","name":"resolve_on_recovery","description":"Pod recovers — incident auto-resolves","expected":{"resolved":true}}
+{"id":"inc-04","name":"escalate_max_attempts","description":"3 failed fixes → incident escalated","expected":{"escalated":true}}
+{"id":"inc-05","name":"mttr_calculation","description":"MTTR correctly calculated from resolved incidents","expected":{"mttr_gt_0":true}}
+{"id":"inc-06","name":"stats_accuracy","description":"Stats correctly count open vs resolved","expected":{"stats_correct":true}}
