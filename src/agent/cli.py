@@ -17,6 +17,13 @@ os.environ.setdefault("OPENBLAS_MAIN_FREE", "1")
 os.environ.setdefault("GOTO_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
+# Load .env into the real process environment. config.py's pydantic Settings
+# reads .env on its own, but several integrations (AWS profile/region,
+# webhook secrets) read os.environ directly — without this, those values
+# are silently ignored even after `agent setup` writes them to .env.
+from dotenv import load_dotenv
+load_dotenv()
+
 import json
 import sys
 import time
