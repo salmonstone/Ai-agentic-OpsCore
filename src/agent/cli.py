@@ -123,10 +123,38 @@ def _k8s_cluster_guard(ctx: typer.Context) -> None:
         return   # these don't touch the cluster
     try:
         from agent.integrations.kubectl import is_cluster_available
-        if is_cluster_available():
-            return
+        if not is_cluster_available():
+            _print_no_cluster_panel()
+            raise typer.Exit(1)
+    except typer.Exit:
+        raise
     except Exception:
-        pass
+        return  # reachability check itself failed — let the subcommand surface its own error
+
+    try:
+        from agent.integrations.kubectl import check_cluster_auth, build_eks_access_fix_hint, get_current_context
+        ok, _detail = check_cluster_auth()
+        if not ok:
+            console.print()
+            console.print(Panel(
+                "[bold red]Connected, but not authorized.[/bold red]\n\n"
+                "The cluster's API server is reachable and your AWS/cloud credentials "
+                "are valid — but the cluster's own RBAC doesn't recognize this identity, "
+                "so every request is rejected before it even checks permissions.\n\n"
+                f"[bold]Fix:[/bold]\n\n{_escape(build_eks_access_fix_hint(get_current_context()))}",
+                title="[bold]Cluster Access Denied[/bold]",
+                border_style="red",
+                padding=(1, 2),
+            ))
+            console.print()
+            raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except Exception:
+        return  # auth probe itself failed — let the subcommand surface its own error
+
+
+def _print_no_cluster_panel() -> None:
     console.print()
     console.print(Panel(
         "[bold red]No Kubernetes cluster connected.[/bold red]\n\n"
@@ -147,7 +175,6 @@ def _k8s_cluster_guard(ctx: typer.Context) -> None:
         padding=(1, 2),
     ))
     console.print()
-    raise typer.Exit(1)
 
 
 aws_app = typer.Typer(

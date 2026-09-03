@@ -103,6 +103,95 @@ def is_cluster_available() -> bool:
     return _set(ok)
 
 
+# Error strings kubectl prints when the API server doesn't recognize the
+# caller's identity at all (as opposed to recognizing it and denying a
+# specific verb, which is a normal RBAC "no").
+_AUTH_UNRECOGNIZED_MARKERS = (
+    "must be logged in to the server",
+    "the server has asked for the client to provide credentials",
+)
+
+_auth_cache: dict = {"ok": None, "ts": 0.0, "ctx": "", "detail": ""}
+
+
+def check_cluster_auth() -> tuple[bool, str]:
+    """
+    Verify the current kubeconfig identity is actually authorized inside the
+    cluster — not just that the API server is reachable.
+
+    is_cluster_available() only proves the server is up (TCP probe); a
+    perfectly valid AWS/GCP/Azure session can still be rejected by the
+    cluster's own RBAC (e.g. missing from an EKS aws-auth ConfigMap). This
+    makes one cheap authenticated call and caches the result for 30s per
+    context so repeated commands don't pay for it each time.
+
+    Returns (ok, error_detail). error_detail is "" when ok is True.
+    """
+    now = time.monotonic()
+    ctx = get_current_context()
+    if (_auth_cache["ok"] is not None and _auth_cache["ctx"] == ctx
+            and (now - _auth_cache["ts"]) < 30):
+        return _auth_cache["ok"], _auth_cache["detail"]
+
+    result = run_kubectl(["auth", "can-i", "get", "pods"], timeout=6)
+    # "yes"/"no" on stdout both mean the server recognized the identity —
+    # only the specific unrecognized-identity errors mean "not authorized at all".
+    unrecognized = any(m in (result.error or "") for m in _AUTH_UNRECOGNIZED_MARKERS)
+    ok = not unrecognized
+    detail = "" if ok else result.error.strip()
+
+    _auth_cache.update({"ok": ok, "ts": now, "ctx": ctx, "detail": detail})
+    return ok, detail
+
+
+def build_eks_access_fix_hint(context_name: str) -> str:
+    """
+    Build actionable remediation text for the EKS aws-auth ConfigMap lockout —
+    where AWS credentials are valid but the cluster's own RBAC has never
+    heard of that IAM identity. Falls back to generic guidance for non-EKS
+    contexts or when details can't be parsed.
+    """
+    import re as _re
+
+    m = _re.search(r"arn:aws:eks:([\w-]+):(\d+):cluster/([\w-]+)", context_name)
+    if not m:
+        return (
+            "Your credentials are valid but the cluster's RBAC doesn't "
+            "recognize this identity. Ask a cluster admin to grant it "
+            "access (e.g. add it to the cluster's RBAC / identity mapping)."
+        )
+
+    region, account, cluster = m.groups()
+    identity = ""
+    try:
+        r = subprocess.run(
+            ["aws", "sts", "get-caller-identity", "--query", "Arn", "--output", "text"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            identity = r.stdout.strip()
+    except Exception:
+        pass
+    identity = identity or "<your IAM user/role ARN>"
+
+    return (
+        f"Your AWS credentials are valid, but cluster '{cluster}' doesn't "
+        f"recognize this identity in its RBAC (aws-auth ConfigMap).\n\n"
+        f"Fix — run as an account admin / root (e.g. via AWS CloudShell), "
+        f"no kubectl access needed:\n\n"
+        f"  aws eks update-cluster-config --name {cluster} --region {region} \\\n"
+        f"    --access-config authenticationMode=API_AND_CONFIG_MAP\n\n"
+        f"  # wait until: aws eks describe-cluster --name {cluster} --region {region} "
+        f"--query cluster.status --output text   (should print ACTIVE)\n\n"
+        f"  aws eks create-access-entry --cluster-name {cluster} --region {region} \\\n"
+        f"    --principal-arn {identity}\n\n"
+        f"  aws eks associate-access-policy --cluster-name {cluster} --region {region} \\\n"
+        f"    --principal-arn {identity} \\\n"
+        f"    --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \\\n"
+        f"    --access-scope type=cluster"
+    )
+
+
 # Pod statuses that we consider unhealthy
 _PROBLEM_STATUSES = {
     "CrashLoopBackOff",
