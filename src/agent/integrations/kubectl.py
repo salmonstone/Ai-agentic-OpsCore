@@ -13,9 +13,11 @@ Works with any cluster: EKS, GKE, AKS, minikube, kind, etc.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from agent.core.models import (
@@ -26,7 +28,80 @@ from agent.observability.logging import get_logger
 
 log = get_logger(__name__)
 
-_TIMEOUT = 30  # seconds for every kubectl call
+_TIMEOUT = 8  # seconds for every kubectl call (reduced from 30 to avoid blocking dashboard)
+
+# Cluster availability cache — checked at most once per 30 seconds
+_avail_cache: dict = {"ok": None, "ts": 0.0}
+
+
+def is_cluster_available() -> bool:
+    """
+    Fast cluster reachability check using a TCP socket probe — no subprocess.
+
+    Reads the kubeconfig to find the API server URL, then attempts a 2-second
+    TCP connection. Returns within ~2 seconds even when the cluster is offline.
+    Caches the result for 30 seconds so the dashboard pusher isn't thrashing.
+    """
+    import socket
+    import re
+    from pathlib import Path as _Path
+
+    now = time.monotonic()
+    if _avail_cache["ok"] is not None and (now - _avail_cache["ts"]) < 30:
+        return _avail_cache["ok"]
+
+    def _set(ok: bool) -> bool:
+        _avail_cache.update({"ok": ok, "ts": now})
+        return ok
+
+    if not shutil.which("kubectl"):
+        return _set(False)
+
+    # Locate kubeconfig
+    import os
+    kube_config_path = os.environ.get("KUBECONFIG") or str(_Path.home() / ".kube" / "config")
+    kube_file = _Path(kube_config_path)
+    if not kube_file.exists():
+        return _set(False)
+
+    # Parse server URL — try yaml first, fall back to regex
+    try:
+        import yaml
+        cfg = yaml.safe_load(kube_file.read_text(encoding="utf-8", errors="replace"))
+        current_ctx = cfg.get("current-context", "")
+        if not current_ctx:
+            return _set(False)
+        ctx_map = {c["name"]: c.get("context", {}) for c in (cfg.get("contexts") or [])}
+        cl_map  = {c["name"]: c.get("cluster", {}) for c in (cfg.get("clusters") or [])}
+        cluster_name = ctx_map.get(current_ctx, {}).get("cluster", "")
+        server = cl_map.get(cluster_name, {}).get("server", "")
+    except Exception:
+        # Regex fallback — grab first `server:` line
+        m = re.search(r'server:\s*(https?://[^\s]+)', kube_file.read_text(errors="replace"))
+        server = m.group(1) if m else ""
+
+    if not server:
+        return _set(False)
+
+    # TCP probe — instant on Windows, no subprocess required
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(server)
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            return _set(False)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2.0)
+        try:
+            ok = sock.connect_ex((host, port)) == 0
+        finally:
+            sock.close()
+    except Exception:
+        ok = False
+
+    return _set(ok)
+
 
 # Pod statuses that we consider unhealthy
 _PROBLEM_STATUSES = {
@@ -50,7 +125,7 @@ _PROBLEM_STATUSES = {
 # Core runner
 # ---------------------------------------------------------------------------
 
-def run_kubectl(command: list[str]) -> KubectlResult:
+def run_kubectl(command: list[str], timeout: int = _TIMEOUT) -> KubectlResult:
     """
     Run a kubectl command safely.
 
@@ -77,7 +152,7 @@ def run_kubectl(command: list[str]) -> KubectlResult:
             command,
             capture_output=True,
             text=True,
-            timeout=_TIMEOUT,
+            timeout=timeout,
         )
         duration_ms = round((time.perf_counter() - t0) * 1000, 1)
         success     = proc.returncode == 0
@@ -647,42 +722,87 @@ def _is_pod_healthy(pod: PodInfo) -> bool:
 
 def get_cluster_overview() -> ClusterOverview:
     """
-    Build a complete snapshot of the cluster:
-    all namespaces → all pods → node status → ClusterOverview.
-    """
-    cluster_name           = _get_cluster_name()
-    total_nodes, healthy_n = _get_node_status()
-    namespace_names        = get_all_namespaces()
+    Build a complete cluster snapshot in ONE kubectl call.
 
+    Previously made N+2 calls (nodes + namespaces + one per namespace for pods).
+    Now: kubectl get nodes,namespaces,pods -A -o json → single auth round-trip.
+    """
+    cluster_name = _get_cluster_name()
     generated_at = datetime.now(timezone.utc).isoformat()
 
+    result = run_kubectl(["get", "nodes,namespaces,pods", "-A", "-o", "json"])
+    if not result.success:
+        log.warning("get_cluster_overview.failed", error=result.error[:200])
+        return ClusterOverview(
+            cluster_name=cluster_name, total_namespaces=0, namespaces=[],
+            total_pods=0, healthy_pods=0, unhealthy_pods=0,
+            total_nodes=0, healthy_nodes=0, generated_at=generated_at,
+        )
+
+    try:
+        items = json.loads(result.output).get("items", [])
+    except Exception as exc:
+        log.warning("get_cluster_overview.parse_error", error=str(exc))
+        items = []
+
+    # Partition by kind
+    raw_nodes:  list[dict] = []
+    raw_ns:     list[dict] = []
+    raw_pods:   list[dict] = []
+    for obj in items:
+        kind = obj.get("kind", "")
+        if kind == "Node":
+            raw_nodes.append(obj)
+        elif kind == "Namespace":
+            raw_ns.append(obj)
+        elif kind == "Pod":
+            raw_pods.append(obj)
+
+    # Node health
+    total_nodes = len(raw_nodes)
+    healthy_n   = 0
+    for node in raw_nodes:
+        for cond in node.get("status", {}).get("conditions", []):
+            if cond.get("type") == "Ready" and cond.get("status") == "True":
+                healthy_n += 1
+                break
+
+    # Namespace names (if none returned, infer from pods)
+    ns_names: list[str] = [
+        obj["metadata"]["name"] for obj in raw_ns
+        if obj.get("metadata", {}).get("name")
+    ]
+    if not ns_names:
+        ns_names = sorted({p["metadata"].get("namespace", "default") for p in raw_pods})
+
+    # Group pods by namespace
+    pods_by_ns: dict[str, list[PodInfo]] = {ns: [] for ns in ns_names}
+    for raw_pod in raw_pods:
+        ns = raw_pod["metadata"].get("namespace", "default")
+        if ns not in pods_by_ns:
+            pods_by_ns[ns] = []
+        pods_by_ns[ns].append(_pod_to_info(raw_pod))
+
+    # Build NamespaceInfo list
     ns_infos: list[NamespaceInfo] = []
     total_pods = healthy_total = unhealthy_total = 0
-
-    for ns_name in namespace_names:
-        pods       = get_pods_in_namespace(ns_name)
-        healthy    = sum(1 for p in pods if _is_pod_healthy(p))
-        unhealthy  = len(pods) - healthy
-
+    for ns_name in ns_names:
+        pods      = pods_by_ns.get(ns_name, [])
+        healthy   = sum(1 for p in pods if _is_pod_healthy(p))
+        unhealthy = len(pods) - healthy
         ns_infos.append(NamespaceInfo(
-            name           = ns_name,
-            pods           = pods,
-            total_pods     = len(pods),
-            healthy_pods   = healthy,
-            unhealthy_pods = unhealthy,
+            name=ns_name, pods=pods,
+            total_pods=len(pods), healthy_pods=healthy, unhealthy_pods=unhealthy,
         ))
-        total_pods     += len(pods)
-        healthy_total  += healthy
+        total_pods      += len(pods)
+        healthy_total   += healthy
         unhealthy_total += unhealthy
 
     log.info(
         "get_cluster_overview.done",
-        cluster=cluster_name,
-        namespaces=len(ns_infos),
-        total_pods=total_pods,
-        unhealthy=unhealthy_total,
+        cluster=cluster_name, namespaces=len(ns_infos),
+        total_pods=total_pods, unhealthy=unhealthy_total,
     )
-
     return ClusterOverview(
         cluster_name     = cluster_name,
         total_namespaces = len(ns_infos),
@@ -1450,3 +1570,1159 @@ def apply_patch(
     ]
     log.info("kubectl.apply_patch", kind=kind, name=name, namespace=namespace, patch_type=patch_type)
     return run_kubectl(cmd)
+
+
+# ---------------------------------------------------------------------------
+# Log analysis
+# ---------------------------------------------------------------------------
+
+_ERROR_RE = re.compile(
+    r"(\bERROR\b|\bFATAL\b|\bPANIC\b|\bpanic\b|\bException\b"
+    r"|connection refused|connection reset|timed out|timeout"
+    r"|out of memory|cannot allocate|OOMKilled"
+    r"|failed to|Failed to|Error:|error:|WARN\b|\bWARNING\b"
+    r"|CrashLoopBackOff|BackOff|segfault|killed)",
+    re.IGNORECASE,
+)
+
+
+def _fetch_pod_errors(pod: PodInfo, tail: int) -> dict | None:
+    """Fetch logs for one pod and return error lines. Returns None if no errors."""
+    raw = get_pod_logs(pod.name, pod.namespace, lines=tail)
+    if not raw or raw.startswith("(no logs"):
+        return None
+    error_lines = [
+        line.strip()
+        for line in raw.splitlines()
+        if _ERROR_RE.search(line) and line.strip()
+    ]
+    if not error_lines:
+        return None
+    return {
+        "pod":         pod.name,
+        "namespace":   pod.namespace,
+        "status":      pod.status,
+        "error_lines": error_lines[:10],
+        "raw_sample":  "\n".join(error_lines[:20]),
+    }
+
+
+def get_all_pod_logs_errors(namespace: str = "all", tail: int = 50) -> list[dict]:
+    """
+    Fetch logs for all running pods in parallel and return only pods with errors.
+    Uses up to 6 parallel workers to avoid being slow on large clusters.
+    """
+    pods = get_pods(namespace)
+    running = [p for p in pods if p.status in ("Running", "CrashLoopBackOff", "Error", "OOMKilled")]
+
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(_fetch_pod_errors, pod, tail): pod for pod in running}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+            except Exception:
+                pass
+
+    results.sort(key=lambda x: len(x["error_lines"]), reverse=True)
+    return results
+
+
+def get_cluster_events(namespace: str = "all") -> list[dict]:
+    """
+    Return Warning-type cluster events sorted by last timestamp.
+    Covers both node and pod events.
+    """
+    args = [
+        "get", "events",
+        "--sort-by=.lastTimestamp",
+        "--no-headers",
+        "-o", (
+            "custom-columns="
+            "TYPE:.type,"
+            "REASON:.reason,"
+            "NS:.involvedObject.namespace,"
+            "KIND:.involvedObject.kind,"
+            "NAME:.involvedObject.name,"
+            "MSG:.message"
+        ),
+    ]
+    if namespace == "all":
+        args.append("-A")
+    else:
+        args += ["-n", namespace]
+
+    result = run_kubectl(args)
+    if not result.success or not result.output.strip():
+        return []
+
+    events: list[dict] = []
+    for line in result.output.strip().splitlines():
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            continue
+        ev_type, reason, ns, kind, name, msg = parts
+        if ev_type.lower() != "warning":
+            continue
+        events.append({
+            "type":      ev_type,
+            "reason":    reason,
+            "namespace": ns,
+            "kind":      kind,
+            "name":      name,
+            "message":   msg.strip(),
+        })
+
+    return events[-50:]
+
+
+# ---------------------------------------------------------------------------
+# Helm
+# ---------------------------------------------------------------------------
+
+def get_helm_releases() -> list[dict]:
+    """
+    List all Helm releases across every namespace.
+    Returns empty list if helm is not installed.
+    """
+    if not shutil.which("helm"):
+        log.debug("helm.not_found")
+        return []
+
+    result = subprocess.run(
+        ["helm", "list", "-A", "--no-headers", "--output", "json"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+
+    try:
+        raw = json.loads(result.stdout)
+    except Exception:
+        return []
+
+    releases: list[dict] = []
+    for r in raw:
+        status = r.get("status", "unknown").lower()
+        is_ok  = status == "deployed"
+        fix    = None
+        if status in ("failed", "pending-upgrade"):
+            fix = f"helm rollback {r.get('name')} -n {r.get('namespace')}"
+        elif status == "pending-install":
+            fix = f"helm uninstall {r.get('name')} -n {r.get('namespace')}"
+
+        releases.append({
+            "name":        r.get("name", ""),
+            "namespace":   r.get("namespace", ""),
+            "chart":       r.get("chart", ""),
+            "app_version": r.get("app_version", ""),
+            "status":      status,
+            "updated":     r.get("updated", ""),
+            "healthy":     is_ok,
+            "fix_command": fix,
+        })
+
+    log.info("helm.list_done", total=len(releases),
+             unhealthy=sum(1 for r in releases if not r["healthy"]))
+    return releases
+
+
+# ---------------------------------------------------------------------------
+# Security audit helpers
+# ---------------------------------------------------------------------------
+
+_SENSITIVE_ENV_RE = re.compile(
+    r"(PASSWORD|SECRET|KEY|TOKEN|API_KEY|APIKEY|PASSWD|CREDENTIAL|AUTH|PRIVATE)",
+    re.IGNORECASE,
+)
+
+
+def _get_pods_json_all(namespace: str = "all") -> list[dict]:
+    """Fetch full pod specs as JSON — shared by all security checks."""
+    args = ["get", "pods", "-o", "json"]
+    if namespace == "all":
+        args.append("-A")
+    else:
+        args.extend(["-n", namespace])
+    result = run_kubectl(args)
+    if not result.success:
+        return []
+    try:
+        return json.loads(result.output).get("items", [])
+    except Exception:
+        return []
+
+
+def get_privileged_pods(namespace: str = "all") -> list[dict]:
+    """Find containers with privileged / allowPrivilegeEscalation / runAsRoot."""
+    findings: list[dict] = []
+    for pod in _get_pods_json_all(namespace):
+        pod_name = pod["metadata"]["name"]
+        pod_ns   = pod["metadata"]["namespace"]
+        pod_sc   = pod.get("spec", {}).get("securityContext", {})
+        for ctr in pod.get("spec", {}).get("containers", []):
+            sc     = ctr.get("securityContext", {})
+            issues = []
+            if sc.get("privileged"):
+                issues.append("privileged=true")
+            if sc.get("allowPrivilegeEscalation"):
+                issues.append("allowPrivilegeEscalation=true")
+            ru = sc.get("runAsUser", pod_sc.get("runAsUser"))
+            if ru == 0:
+                issues.append("runAsUser=0 (root)")
+            if issues:
+                findings.append({
+                    "pod": pod_name, "namespace": pod_ns,
+                    "container": ctr["name"], "issues": issues,
+                })
+    log.info("security.privileged_pods", count=len(findings))
+    return findings
+
+
+def get_secrets_in_env(namespace: str = "all") -> list[dict]:
+    """Find pods with sensitive values hardcoded as plain env vars (not secretRef)."""
+    findings: list[dict] = []
+    for pod in _get_pods_json_all(namespace):
+        pod_name = pod["metadata"]["name"]
+        pod_ns   = pod["metadata"]["namespace"]
+        for ctr in pod.get("spec", {}).get("containers", []):
+            for env in ctr.get("env", []):
+                name = env.get("name", "")
+                if _SENSITIVE_ENV_RE.search(name) and "value" in env and "valueFrom" not in env:
+                    findings.append({
+                        "pod": pod_name, "namespace": pod_ns,
+                        "container": ctr["name"], "env_var": name,
+                    })
+    log.info("security.secrets_in_env", count=len(findings))
+    return findings
+
+
+def get_rbac_issues() -> list[dict]:
+    """Detect dangerous RBAC bindings: anonymous access, cluster-admin misuse, wildcards."""
+    findings: list[dict] = []
+
+    crb = run_kubectl(["get", "clusterrolebindings", "-o", "json"])
+    if crb.success:
+        try:
+            for b in json.loads(crb.output).get("items", []):
+                bname    = b["metadata"]["name"]
+                role_ref = b.get("roleRef", {}).get("name", "")
+                for subj in b.get("subjects", []) or []:
+                    sname = subj.get("name", "")
+                    if sname in ("system:anonymous", "system:unauthenticated"):
+                        findings.append({
+                            "binding": bname, "kind": "ClusterRoleBinding",
+                            "role": role_ref, "subject": sname,
+                            "namespace": "cluster-wide",
+                            "issue": f"Bound to {sname} — anyone can access cluster",
+                        })
+                    elif role_ref == "cluster-admin" and not sname.startswith("system:"):
+                        findings.append({
+                            "binding": bname, "kind": "ClusterRoleBinding",
+                            "role": "cluster-admin", "subject": sname,
+                            "namespace": "cluster-wide",
+                            "issue": f"cluster-admin granted to non-system account: {sname}",
+                        })
+        except Exception:
+            pass
+
+    cr = run_kubectl(["get", "clusterroles", "-o", "json"])
+    if cr.success:
+        try:
+            for role in json.loads(cr.output).get("items", []):
+                rname = role["metadata"]["name"]
+                if rname.startswith("system:"):
+                    continue
+                for rule in role.get("rules", []):
+                    if "*" in rule.get("verbs", []) and "*" in rule.get("resources", []):
+                        findings.append({
+                            "binding": rname, "kind": "ClusterRole",
+                            "role": rname, "subject": "N/A",
+                            "namespace": "cluster-wide",
+                            "issue": "Wildcard permissions (verbs=[*] resources=[*])",
+                        })
+                        break
+        except Exception:
+            pass
+
+    log.info("security.rbac_issues", count=len(findings))
+    return findings
+
+
+def get_network_policy_gaps(namespace: str = "all") -> list[dict]:
+    """Find namespaces that have no NetworkPolicy — pods can communicate freely."""
+    ns_res = run_kubectl(["get", "namespaces", "-o", "json"])
+    if not ns_res.success:
+        return []
+    try:
+        skip = {"kube-system", "kube-public", "kube-node-lease"}
+        all_ns = [
+            n["metadata"]["name"]
+            for n in json.loads(ns_res.output).get("items", [])
+            if n["metadata"]["name"] not in skip
+        ]
+    except Exception:
+        return []
+
+    np_res = run_kubectl(["get", "networkpolicies", "-A", "-o", "json"])
+    protected: set[str] = set()
+    if np_res.success:
+        try:
+            for np in json.loads(np_res.output).get("items", []):
+                protected.add(np["metadata"]["namespace"])
+        except Exception:
+            pass
+
+    findings = []
+    for ns_name in all_ns:
+        if namespace != "all" and ns_name != namespace:
+            continue
+        if ns_name not in protected:
+            findings.append({
+                "namespace": ns_name,
+                "issue":     "No NetworkPolicy — unrestricted pod-to-pod traffic",
+                "risk":      "high" if ns_name in {"production", "prod", "default"} else "medium",
+            })
+
+    log.info("security.network_policy_gaps", count=len(findings))
+    return findings
+
+
+def get_pods_running_as_root(namespace: str = "all") -> list[dict]:
+    """Find containers explicitly running as root or with no securityContext."""
+    findings: list[dict] = []
+    for pod in _get_pods_json_all(namespace):
+        pod_name = pod["metadata"]["name"]
+        pod_ns   = pod["metadata"]["namespace"]
+        pod_sc   = pod.get("spec", {}).get("securityContext", {})
+        for ctr in pod.get("spec", {}).get("containers", []):
+            sc  = ctr.get("securityContext", {})
+            ru  = sc.get("runAsUser", pod_sc.get("runAsUser"))
+            rnr = sc.get("runAsNonRoot", pod_sc.get("runAsNonRoot"))
+            if ru == 0:
+                findings.append({
+                    "pod": pod_name, "namespace": pod_ns,
+                    "container": ctr["name"],
+                    "issue": "Explicitly running as root (runAsUser=0)",
+                    "explicit": True,
+                })
+            elif ru is None and rnr is None:
+                findings.append({
+                    "pod": pod_name, "namespace": pod_ns,
+                    "container": ctr["name"],
+                    "issue": "No securityContext — may run as root by default",
+                    "explicit": False,
+                })
+
+    log.info("security.pods_as_root", count=len(findings))
+    return findings
+
+
+_INGRESS_CONTROLLER_NAMES = {
+    "ingress-nginx", "ingress-nginx-controller",
+    "istio-ingressgateway", "istio-ingress",
+    "traefik", "traefik-web", "traefik-websecure",
+    "ambassador", "ambassador-admin",
+    "kong", "kong-proxy",
+    "haproxy-ingress", "nginx-ingress-controller",
+    "envoy", "contour",
+    "aws-load-balancer-controller",
+}
+_STANDARD_PORTS = {80, 443, 8080, 8443}
+
+
+def _detect_ingress_controller(sname: str, labels: dict) -> tuple[bool, str]:
+    """Return (is_ingress, controller_type) by matching service name and labels."""
+    name_lower = sname.lower()
+    for known in _INGRESS_CONTROLLER_NAMES:
+        if known in name_lower:
+            return True, known
+    # Check common labels used by ingress controllers
+    for label_key in ("app.kubernetes.io/name", "app", "app.kubernetes.io/component"):
+        label_val = labels.get(label_key, "").lower()
+        for known in ("ingress-nginx", "istio-ingressgateway", "traefik",
+                      "ambassador", "kong", "contour"):
+            if known in label_val:
+                return True, label_val
+    return False, ""
+
+
+def get_exposed_services(namespace: str = "all") -> list[dict]:
+    """
+    Find LoadBalancer and NodePort services.
+
+    Returns enriched data including:
+    - is_ingress: whether this is a known ingress controller
+    - ingress_type: name of the ingress controller
+    - port_numbers: list of int port numbers
+    - non_standard_ports: ports outside {80, 443, 8080, 8443}
+    """
+    args = ["get", "services", "-o", "json"]
+    if namespace == "all":
+        args.append("-A")
+    else:
+        args.extend(["-n", namespace])
+    result = run_kubectl(args)
+    if not result.success:
+        return []
+
+    findings: list[dict] = []
+    try:
+        for svc in json.loads(result.output).get("items", []):
+            sname  = svc["metadata"]["name"]
+            sns    = svc["metadata"]["namespace"]
+            stype  = svc["spec"].get("type", "ClusterIP")
+            if stype not in ("LoadBalancer", "NodePort"):
+                continue
+            labels = svc["metadata"].get("labels", {})
+            ext_ip = ""
+            if stype == "LoadBalancer":
+                ing = svc.get("status", {}).get("loadBalancer", {}).get("ingress", [])
+                if ing:
+                    ext_ip = ing[0].get("hostname") or ing[0].get("ip", "")
+
+            port_specs   = svc["spec"].get("ports", [])
+            port_numbers = [p.get("port", 0) for p in port_specs]
+            ports_str    = ", ".join(
+                f"{p.get('port')}/{p.get('protocol','TCP')}" for p in port_specs
+            )
+            non_standard = [p for p in port_numbers if p not in _STANDARD_PORTS]
+            is_ingress, ingress_type = _detect_ingress_controller(sname, labels)
+
+            sensitive = {"kube-system", "default", "production", "prod"}
+            findings.append({
+                "service":           sname,
+                "namespace":         sns,
+                "type":              stype,
+                "ports":             ports_str,
+                "port_numbers":      port_numbers,
+                "non_standard_ports": non_standard,
+                "external_ip":       ext_ip,
+                "is_ingress":        is_ingress,
+                "ingress_type":      ingress_type,
+                "risk":              "high" if sns in sensitive else "medium",
+            })
+    except Exception:
+        pass
+
+    log.info("security.exposed_services", count=len(findings))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Cost analysis helpers
+# ---------------------------------------------------------------------------
+
+def parse_cpu(value: str) -> float:
+    """Convert K8s CPU string to float cores. '500m'->0.5, '2'->2.0, '1500m'->1.5"""
+    if not value or value in ("0", ""):
+        return 0.0
+    value = value.strip()
+    if value.endswith("m"):
+        return round(int(value[:-1]) / 1000, 4)
+    try:
+        return float(value)
+    except ValueError:
+        return 0.0
+
+
+def parse_memory(value: str) -> float:
+    """Convert K8s memory string to float GB. '512Mi'->0.5, '2Gi'->2.0"""
+    if not value or value in ("0", ""):
+        return 0.0
+    value = value.strip()
+    if value.endswith("Ki"):
+        return round(int(value[:-2]) / 1_048_576, 4)
+    if value.endswith("Mi"):
+        return round(int(value[:-2]) / 1024, 4)
+    if value.endswith("Gi"):
+        return round(float(value[:-2]), 4)
+    if value.endswith("Ti"):
+        return round(float(value[:-2]) * 1024, 4)
+    if value.endswith("K"):
+        return round(int(value[:-1]) / 1_000_000, 4)
+    if value.endswith("M"):
+        return round(int(value[:-1]) / 1000, 4)
+    if value.endswith("G"):
+        return round(float(value[:-1]), 4)
+    # raw bytes
+    try:
+        return round(int(value) / (1024 ** 3), 4)
+    except ValueError:
+        return 0.0
+
+
+def get_nodes_and_pods(namespace: str = "all") -> tuple[list[dict], list[dict]]:
+    """
+    Fetch nodes AND pods in a single kubectl call to avoid double auth round-trips.
+
+    Returns (nodes_list, pods_list) — same shapes as the old separate functions.
+    """
+    args = ["get", "nodes,pods", "-o", "json"]
+    if namespace == "all":
+        args.append("-A")
+    else:
+        args.extend(["-n", namespace])
+
+    result = run_kubectl(args)
+    if not result.success:
+        log.warning("cost.fetch_failed", error=result.error[:120])
+        return [], []
+
+    nodes: list[dict] = []
+    pods:  list[dict] = []
+
+    try:
+        data  = json.loads(result.output)
+        items = data.get("items", [])
+        for obj in items:
+            kind = obj.get("kind", "")
+
+            if kind == "Node":
+                labels = obj["metadata"].get("labels", {})
+                inst   = (
+                    labels.get("node.kubernetes.io/instance-type")
+                    or labels.get("beta.kubernetes.io/instance-type")
+                    or "unknown"
+                )
+                region = (
+                    labels.get("topology.kubernetes.io/region")
+                    or labels.get("failure-domain.beta.kubernetes.io/region")
+                    or "us-east-1"
+                )
+                alloc  = obj.get("status", {}).get("allocatable", {})
+                nodes.append({
+                    "name":          obj["metadata"]["name"],
+                    "instance_type": inst,
+                    "cpu":           parse_cpu(alloc.get("cpu", "0")),
+                    "memory_gb":     parse_memory(alloc.get("memory", "0")),
+                    "region":        region,
+                })
+
+            elif kind == "Pod":
+                phase = obj.get("status", {}).get("phase", "")
+                if phase not in ("Running", "Pending", ""):
+                    continue
+                name      = obj["metadata"]["name"]
+                ns        = obj["metadata"].get("namespace", "default")
+                node_name = obj["spec"].get("nodeName", "")
+                owners    = obj["metadata"].get("ownerReferences", [])
+                deployment = ""
+                for owner in owners:
+                    okind = owner.get("kind", "")
+                    if okind == "ReplicaSet":
+                        rs = owner["name"]
+                        deployment = "-".join(rs.split("-")[:-1]) or rs
+                        break
+                    if okind in ("Deployment", "StatefulSet", "DaemonSet"):
+                        deployment = owner["name"]
+                        break
+                if not deployment:
+                    deployment = name
+                total_cpu = total_mem = 0.0
+                for container in obj["spec"].get("containers", []):
+                    req = container.get("resources", {}).get("requests", {})
+                    total_cpu += parse_cpu(req.get("cpu", "0"))
+                    total_mem += parse_memory(req.get("memory", "0"))
+                pods.append({
+                    "pod":            name,
+                    "namespace":      ns,
+                    "deployment":     deployment,
+                    "cpu_request":    total_cpu,
+                    "memory_request": total_mem,
+                    "node_name":      node_name,
+                })
+
+    except Exception as exc:
+        log.warning("cost.parse_error", error=str(exc))
+
+    log.info("cost.fetched", nodes=len(nodes), pods=len(pods))
+    return nodes, pods
+
+
+def get_node_instance_types() -> list[dict]:
+    """Kept for backwards-compat. Use get_nodes_and_pods() for cost scans."""
+    nodes, _ = get_nodes_and_pods()
+    return nodes
+
+
+def get_pod_resource_requests(namespace: str = "all") -> list[dict]:
+    """Kept for backwards-compat. Use get_nodes_and_pods() for cost scans."""
+    _, pods = get_nodes_and_pods(namespace)
+    return pods
+
+
+_TOP_TIMEOUT = 15  # kubectl top polls metrics-server; give it a real chance
+
+def get_pod_actual_usage(namespace: str = "all") -> list[dict]:
+    """Run kubectl top pods and return actual CPU/memory usage per pod."""
+    args = ["top", "pods", "--no-headers"]
+    if namespace == "all":
+        args.append("-A")
+    else:
+        args.extend(["-n", namespace])
+    result = run_kubectl(args, timeout=_TOP_TIMEOUT)
+    if not result.success:
+        return []
+    usage: list[dict] = []
+    try:
+        for line in result.output.strip().splitlines():
+            parts = line.split()
+            if namespace == "all" and len(parts) >= 4:
+                ns, pod_name, cpu_str, mem_str = parts[0], parts[1], parts[2], parts[3]
+            elif namespace != "all" and len(parts) >= 3:
+                ns, pod_name, cpu_str, mem_str = namespace, parts[0], parts[1], parts[2]
+            else:
+                continue
+            usage.append({
+                "pod":           pod_name,
+                "namespace":     ns,
+                "cpu_actual":    parse_cpu(cpu_str),
+                "memory_actual": parse_memory(mem_str),
+            })
+    except Exception:
+        pass
+    log.info("cost.pod_usage", count=len(usage))
+    return usage
+
+
+# ---------------------------------------------------------------------------
+# Multi-cluster context management
+# ---------------------------------------------------------------------------
+
+def get_all_contexts() -> list:
+    """Parse ~/.kube/config and return all configured contexts as ClusterContext objects."""
+    from agent.core.models import ClusterContext
+
+    result = run_kubectl(["config", "view", "-o", "json"])
+    if not result.success:
+        return []
+
+    try:
+        cfg         = json.loads(result.output)
+        current_ctx = cfg.get("current-context", "")
+
+        clusters_map: dict[str, str] = {
+            c["name"]: c.get("cluster", {}).get("server", "")
+            for c in cfg.get("clusters", [])
+        }
+        context_map: dict[str, dict] = {
+            c["name"]: c.get("context", {})
+            for c in cfg.get("contexts", [])
+        }
+
+        contexts = []
+        for ctx_name, ctx_data in context_map.items():
+            provider = _detect_provider(ctx_name, clusters_map.get(ctx_data.get("cluster", ""), ""))
+            region   = _detect_region(ctx_name)
+            env      = _detect_environment(ctx_name)
+            contexts.append(ClusterContext(
+                name          = ctx_name,
+                cluster       = ctx_data.get("cluster", ""),
+                user          = ctx_data.get("user", ""),
+                namespace     = ctx_data.get("namespace", "default") or "default",
+                is_current    = (ctx_name == current_ctx),
+                cloud_provider = provider,
+                region        = region,
+                environment   = env,
+            ))
+
+        log.info("multicluster.contexts_found", count=len(contexts))
+        return contexts
+    except Exception as exc:
+        log.warning("multicluster.contexts_parse_failed", error=str(exc))
+        return []
+
+
+def _detect_provider(ctx_name: str, server_url: str) -> str:
+    name = ctx_name.lower()
+    url  = server_url.lower()
+    if "eks" in name or "amazonaws" in url or "aws" in name:
+        return "aws"
+    if "gke" in name or "googleapis" in url or "gcp" in name:
+        return "gcp"
+    if "aks" in name or "azure" in url:
+        return "azure"
+    if "minikube" in name or "kind" in name or "docker-desktop" in name or "rancher" in name:
+        return "local"
+    return "unknown"
+
+
+def _detect_region(ctx_name: str) -> str:
+    import re as _re
+    m = _re.search(
+        r"(us-east-[12]|us-west-[12]|eu-west-[123]|eu-central-1"
+        r"|ap-south-1|ap-southeast-[12]|ap-northeast-[123]"
+        r"|ca-central-1|sa-east-1)",
+        ctx_name, _re.IGNORECASE,
+    )
+    return m.group(1).lower() if m else ""
+
+
+def _detect_environment(ctx_name: str) -> str:
+    name = ctx_name.lower()
+    if any(x in name for x in ("prod", "production", "prd")):
+        return "production"
+    if any(x in name for x in ("stag", "staging", "stage")):
+        return "staging"
+    if any(x in name for x in ("dev", "develop", "development", "local")):
+        return "development"
+    if any(x in name for x in ("test", "testing", "qa", "uat")):
+        return "testing"
+    return "unknown"
+
+
+def get_current_context() -> str:
+    result = run_kubectl(["config", "current-context"])
+    return result.output.strip() if result.success else ""
+
+
+def switch_context(context_name: str) -> bool:
+    result = run_kubectl(["config", "use-context", context_name])
+    if result.success:
+        log.info("multicluster.switched", context=context_name)
+    else:
+        log.warning("multicluster.switch_failed", context=context_name, error=result.error)
+    return result.success
+
+
+def get_context_node_count(context_name: str) -> int:
+    """Get node count for a context without permanently switching to it."""
+    result = subprocess.run(
+        ["kubectl", "get", "nodes", "--no-headers",
+         f"--context={context_name}"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        return -1
+    return len([l for l in result.stdout.strip().splitlines() if l.strip()])
+
+
+def add_eks_cluster(cluster_name: str, region: str, profile: str = "default") -> bool:
+    """Run aws eks update-kubeconfig to add a cluster to kubeconfig."""
+    if not shutil.which("aws"):
+        log.warning("multicluster.aws_cli_missing")
+        return False
+    result = subprocess.run(
+        ["aws", "eks", "update-kubeconfig",
+         "--name", cluster_name,
+         "--region", region,
+         "--profile", profile],
+        capture_output=True, text=True, timeout=30,
+    )
+    success = result.returncode == 0
+    if success:
+        log.info("multicluster.eks_added", cluster=cluster_name, region=region)
+    else:
+        log.warning("multicluster.eks_add_failed", error=result.stderr[:200])
+    return success
+
+
+def rename_context(old_name: str, new_name: str) -> bool:
+    result = run_kubectl(["config", "rename-context", old_name, new_name])
+    return result.success
+
+
+def get_cluster_summary(context_name: str) -> dict:
+    """Get pod + namespace count for a context."""
+    pods_res = subprocess.run(
+        ["kubectl", "get", "pods", "-A", "--no-headers",
+         f"--context={context_name}"],
+        capture_output=True, text=True, timeout=15,
+    )
+    ns_res = subprocess.run(
+        ["kubectl", "get", "namespaces", "--no-headers",
+         f"--context={context_name}"],
+        capture_output=True, text=True, timeout=15,
+    )
+    ver_res = subprocess.run(
+        ["kubectl", "version", "--short", f"--context={context_name}"],
+        capture_output=True, text=True, timeout=15,
+    )
+    pod_lines = [l for l in pods_res.stdout.strip().splitlines() if l.strip()]
+    ns_lines  = [l for l in ns_res.stdout.strip().splitlines() if l.strip()]
+    version   = ""
+    for line in ver_res.stdout.splitlines():
+        if "Server" in line:
+            version = line.split(":", 1)[-1].strip()
+            break
+    return {
+        "pod_count":       len(pod_lines),
+        "namespace_count": len(ns_lines),
+        "k8s_version":     version,
+        "reachable":       pods_res.returncode == 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pod Log Analysis helpers
+# ---------------------------------------------------------------------------
+
+def get_pod_logs_smart(pod: str, namespace: str, lines: int = 200, container: str | None = None) -> "PodLogs":
+    """
+    Production-grade log fetching. Gets current + previous (crash) logs for all containers.
+    Handles: pod not found, pending pods, multi-container, permission errors.
+    """
+    from agent.core.models import PodLogs
+
+    result = PodLogs(pod=pod, namespace=namespace)
+
+    # Discover containers via pod JSON
+    pod_result = run_kubectl(["get", "pod", pod, "-n", namespace, "-o", "json"])
+    if not pod_result.success:
+        err = pod_result.error.lower()
+        if "not found" in err:
+            result.fetch_errors.append(f"Pod '{pod}' not found in namespace '{namespace}'")
+        else:
+            result.fetch_errors.append(f"Cannot access pod: {pod_result.error[:200]}")
+        return result
+
+    try:
+        pod_spec = json.loads(pod_result.output)
+        containers_raw = pod_spec.get("spec", {}).get("containers", [])
+        init_containers = pod_spec.get("spec", {}).get("initContainers", [])
+        all_containers = [c["name"] for c in containers_raw] + [c["name"] for c in init_containers]
+        phase = pod_spec.get("status", {}).get("phase", "")
+    except Exception:
+        all_containers = []
+        phase = ""
+
+    if not all_containers:
+        result.fetch_errors.append("No containers found in pod spec")
+        return result
+
+    # If specific container requested, filter to just that one
+    target_containers = [container] if container and container in all_containers else all_containers
+    result.containers = all_containers
+
+    # Handle pending pods
+    if phase == "Pending":
+        result.fetch_errors.append(
+            "Pod is Pending — container has not started yet. Check events with: "
+            "kubectl describe pod " + pod + " -n " + namespace
+        )
+        return result
+
+    total_lines = 0
+    for cname in target_containers:
+        # Current logs
+        cur = run_kubectl(["logs", pod, "-n", namespace, "-c", cname, f"--tail={lines}"])
+        if cur.success and cur.output.strip():
+            result.current_logs[cname] = cur.output
+            total_lines += len(cur.output.splitlines())
+        elif cur.error:
+            err = cur.error.lower()
+            if "permission denied" in err or "forbidden" in err:
+                result.fetch_errors.append(f"Permission denied reading logs for container '{cname}'")
+            elif "container" in err and ("not found" in err or "invalid" in err):
+                result.fetch_errors.append(f"Container '{cname}' not found or not ready")
+            # else: silently skip (e.g. init container already completed)
+
+        # Previous logs (the crash — most important for CrashLoopBackOff)
+        prev = run_kubectl(["logs", pod, "-n", namespace, "-c", cname, "--previous", f"--tail={lines}"])
+        if prev.success and prev.output.strip():
+            result.previous_logs[cname] = prev.output
+            result.has_previous = True
+            total_lines += len(prev.output.splitlines())
+        # previous logs not existing is expected — skip silently
+
+    result.log_lines_count = total_lines
+    log.info("logs.fetched", pod=pod, namespace=namespace,
+             containers=len(target_containers), lines=total_lines, has_previous=result.has_previous)
+    return result
+
+
+def get_container_states(pod: str, namespace: str) -> list["ContainerState"]:
+    """Extract per-container state, restart count, exit code, and reason from pod JSON."""
+    from agent.core.models import ContainerState
+
+    result = run_kubectl(["get", "pod", pod, "-n", namespace, "-o", "json"])
+    if not result.success:
+        return []
+
+    states: list[ContainerState] = []
+    try:
+        data = json.loads(result.output)
+        status = data.get("status", {})
+
+        for cs in status.get("containerStatuses", []) + status.get("initContainerStatuses", []):
+            name          = cs.get("name", "")
+            ready         = cs.get("ready", False)
+            restart_count = cs.get("restartCount", 0)
+
+            state_dict = cs.get("state", {})
+            last_dict  = cs.get("lastState", {})
+
+            def _parse_state(d: dict) -> tuple[str, int | None, str | None]:
+                if "running" in d:
+                    return "running", None, None
+                if "waiting" in d:
+                    w = d["waiting"]
+                    return "waiting", None, w.get("reason")
+                if "terminated" in d:
+                    t = d["terminated"]
+                    return "terminated", t.get("exitCode"), t.get("reason")
+                return "unknown", None, None
+
+            state_str, exit_code, reason = _parse_state(state_dict)
+            last_state_str, last_exit, last_reason = _parse_state(last_dict)
+
+            # For CrashLoopBackOff the real reason is in lastState
+            if reason == "CrashLoopBackOff" and last_reason:
+                reason = f"CrashLoopBackOff (last: {last_reason})"
+            if exit_code is None and last_exit is not None:
+                exit_code = last_exit
+
+            states.append(ContainerState(
+                name=name, ready=ready, restart_count=restart_count,
+                state=state_str, last_state=last_state_str,
+                exit_code=exit_code, reason=reason,
+            ))
+    except Exception as exc:
+        log.warning("container_states.parse_error", error=str(exc))
+
+    return states
+
+
+_ERROR_PATTERNS: list[tuple[str, list[str]]] = [
+    ("OOM",        ["out of memory", "oomkilled", "heap limit", "heap oom", "cannot allocate memory",
+                    "allocation failed", "java.lang.outofmemoryerror", "exit code 137"]),
+    ("NETWORK",    ["connection refused", "connection timed out", "no route to host",
+                    "dial tcp", "i/o timeout", "network unreachable", "econnrefused",
+                    "econnreset", "dns resolution failed", "name or service not known"]),
+    ("CONFIG",     ["no such file or directory", "file not found", "config not found",
+                    "missing required", "invalid configuration", "cannot parse",
+                    "environment variable", "no value for"]),
+    ("PERMISSION", ["permission denied", "access denied", "operation not permitted",
+                    "cannot open", "forbidden", "unauthorized"]),
+    ("CRASH",      ["panic:", "fatal error", "segmentation fault", "core dumped",
+                    "killed", "signal: killed", "traceback", "exception in thread",
+                    "unhandled exception", "stack overflow"]),
+]
+
+def extract_error_patterns(logs: str) -> list[dict]:
+    """
+    Scan log text for known error signatures.
+    Returns list of {line_no, line, pattern_type} for the most important lines.
+    Caps at 20 matches to avoid flooding Claude's context.
+    """
+    matches: list[dict] = []
+    seen_lines: set[str] = set()
+    for line_no, line in enumerate(logs.splitlines(), 1):
+        lower = line.lower().strip()
+        if not lower or lower in seen_lines:
+            continue
+        for pattern_type, keywords in _ERROR_PATTERNS:
+            if any(kw in lower for kw in keywords):
+                seen_lines.add(lower)
+                matches.append({
+                    "line_no":      line_no,
+                    "line":         line.strip()[:300],
+                    "pattern_type": pattern_type,
+                })
+                break
+        if len(matches) >= 20:
+            break
+    return matches
+
+
+# ---------------------------------------------------------------------------
+# Deployment Management
+# ---------------------------------------------------------------------------
+
+def get_deployment_info(deployment: str, namespace: str) -> "DeploymentInfo | None":
+    from agent.core.models import DeploymentInfo
+    r = run_kubectl(["get", "deployment", deployment, "-n", namespace, "-o", "json"])
+    if not r.success:
+        return None
+    try:
+        d = json.loads(r.output)
+        spec        = d.get("spec", {})
+        status      = d.get("status", {})
+        containers  = spec.get("template", {}).get("spec", {}).get("containers", [])
+        images      = [c.get("image", "") for c in containers]
+        names       = [c.get("name", "") for c in containers]
+        strategy    = spec.get("strategy", {})
+        rolling     = strategy.get("rollingUpdate", {})
+        desired     = spec.get("replicas", 0)
+        ready       = status.get("readyReplicas", 0) or 0
+        annotation  = d.get("metadata", {}).get("annotations", {})
+        revision    = int(annotation.get("deployment.kubernetes.io/revision", 0))
+        labels      = d.get("metadata", {}).get("labels", {})
+        return DeploymentInfo(
+            name             = d["metadata"]["name"],
+            namespace        = d["metadata"]["namespace"],
+            replicas_desired = desired,
+            replicas_ready   = ready,
+            current_image    = images[0] if images else "",
+            containers       = names,
+            strategy         = strategy.get("type", "RollingUpdate"),
+            max_surge        = str(rolling.get("maxSurge", "25%")),
+            max_unavailable  = str(rolling.get("maxUnavailable", "25%")),
+            revision         = revision,
+            healthy          = ready >= desired > 0,
+            labels           = labels,
+        )
+    except Exception as exc:
+        log.warning("get_deployment_info.parse_error", error=str(exc))
+        return None
+
+
+def get_deployment_history(deployment: str, namespace: str) -> list["Revision"]:
+    from agent.core.models import Revision
+    import json as _json
+
+    r = run_kubectl(["rollout", "history", f"deployment/{deployment}", "-n", namespace])
+    if not r.success:
+        return []
+
+    # Build revision → creationTimestamp map from ReplicaSets.
+    # Each RS carries the annotation deployment.kubernetes.io/revision.
+    rs_r = run_kubectl(["get", "rs", "-n", namespace, "-o", "json"], timeout=20)
+    rev_ts: dict[int, str] = {}
+    if rs_r.success:
+        try:
+            items = _json.loads(rs_r.output).get("items", [])
+            for rs in items:
+                ann = rs.get("metadata", {}).get("annotations", {})
+                rev_ann = ann.get("deployment.kubernetes.io/revision", "")
+                owner_refs = rs.get("metadata", {}).get("ownerReferences", [])
+                owned_by_dep = any(
+                    o.get("kind") == "Deployment" and o.get("name") == deployment
+                    for o in owner_refs
+                )
+                if rev_ann.isdigit() and owned_by_dep:
+                    rev_ts[int(rev_ann)] = rs["metadata"].get("creationTimestamp", "")
+        except Exception:
+            pass
+
+    revisions: list[Revision] = []
+    for line in r.output.splitlines():
+        line = line.strip()
+        if not line or line.startswith("REVISION") or line.startswith("deployment"):
+            continue
+        parts = line.split(None, 1)
+        if not parts or not parts[0].isdigit():
+            continue
+        rev_num = int(parts[0])
+        cause   = parts[1].strip() if len(parts) > 1 else "<none>"
+
+        # Get image for this revision
+        detail = run_kubectl([
+            "rollout", "history", f"deployment/{deployment}",
+            "-n", namespace, f"--revision={rev_num}",
+        ], timeout=15)
+        image = ""
+        if detail.success:
+            for dl in detail.output.splitlines():
+                if "Image:" in dl:
+                    image = dl.split("Image:")[-1].strip()
+                    break
+
+        revisions.append(Revision(
+            revision_number = rev_num,
+            image           = image,
+            change_cause    = cause,
+            created_at      = rev_ts.get(rev_num, ""),
+        ))
+
+    return sorted(revisions, key=lambda x: x.revision_number, reverse=True)
+
+
+def get_previous_revision(deployment: str, namespace: str) -> "Revision | None":
+    history = get_deployment_history(deployment, namespace)
+    if len(history) < 2:
+        return None
+    return history[1]  # [0] is current (highest revision)
+
+
+def rollout_undo(deployment: str, namespace: str, to_revision: int | None = None) -> KubectlResult:
+    cmd = ["rollout", "undo", f"deployment/{deployment}", "-n", namespace]
+    if to_revision:
+        cmd += [f"--to-revision={to_revision}"]
+    return run_kubectl(cmd)
+
+
+def rollout_restart(deployment: str, namespace: str) -> KubectlResult:
+    return run_kubectl(["rollout", "restart", f"deployment/{deployment}", "-n", namespace])
+
+
+def set_image(deployment: str, namespace: str, container: str, image: str) -> KubectlResult:
+    return run_kubectl([
+        "set", "image", f"deployment/{deployment}",
+        f"{container}={image}", "-n", namespace,
+    ])
+
+
+def restart_deployment(deployment: str, namespace: str) -> KubectlResult:
+    return run_kubectl(["rollout", "restart", f"deployment/{deployment}", "-n", namespace])
+
+
+def wait_for_rollout(deployment: str, namespace: str, timeout: int = 120) -> bool:
+    r = run_kubectl([
+        "rollout", "status", f"deployment/{deployment}",
+        "-n", namespace, f"--timeout={timeout}s",
+    ], timeout=timeout + 10)
+    return r.success and "successfully rolled out" in r.output.lower()
+
+
+def check_node_capacity(cpu_needed_m: int = 0, memory_needed_mb: int = 0) -> dict:
+    """Estimate if cluster has room. Returns has_capacity + available figures."""
+    nodes_r = run_kubectl(["get", "nodes", "-o", "json"])
+    top_r   = run_kubectl(["top", "nodes", "--no-headers"], timeout=20)
+
+    allocatable_cpu_m   = 0
+    allocatable_mem_mb  = 0
+
+    if nodes_r.success:
+        try:
+            for node in json.loads(nodes_r.output).get("items", []):
+                alloc = node.get("status", {}).get("allocatable", {})
+                allocatable_cpu_m  += parse_cpu(alloc.get("cpu", "0"))
+                allocatable_mem_mb += parse_memory(alloc.get("memory", "0"))
+        except Exception:
+            pass
+
+    used_cpu_m  = 0
+    used_mem_mb = 0
+    if top_r.success:
+        for line in top_r.output.splitlines():
+            parts = line.split()
+            if len(parts) >= 3:
+                used_cpu_m  += parse_cpu(parts[1])
+                used_mem_mb += parse_memory(parts[2])
+
+    free_cpu_m  = max(allocatable_cpu_m  - used_cpu_m,  0)
+    free_mem_mb = max(allocatable_mem_mb - used_mem_mb, 0)
+
+    has_capacity = (
+        (cpu_needed_m    == 0 or free_cpu_m  >= cpu_needed_m) and
+        (memory_needed_mb == 0 or free_mem_mb >= memory_needed_mb)
+    )
+    return {
+        "has_capacity":     has_capacity,
+        "free_cpu_m":       free_cpu_m,
+        "free_mem_mb":      free_mem_mb,
+        "allocatable_cpu":  f"{allocatable_cpu_m}m",
+        "allocatable_mem":  f"{allocatable_mem_mb}Mi",
+        "used_cpu":         f"{used_cpu_m}m",
+        "used_mem":         f"{used_mem_mb}Mi",
+    }
+
+
+def check_image_exists(image: str) -> bool:
+    """Best-effort: check if image is already running in cluster (fast path)."""
+    r = run_kubectl(["get", "pods", "-A", "-o", "json"])
+    if not r.success:
+        return True  # assume OK if we can't check
+    try:
+        for item in json.loads(r.output).get("items", []):
+            for c in item.get("spec", {}).get("containers", []):
+                if c.get("image", "") == image:
+                    return True
+    except Exception:
+        pass
+    # Basic format validation — if it has a colon it's likely real
+    return ":" in image or "/" in image
