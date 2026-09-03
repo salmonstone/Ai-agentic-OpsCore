@@ -167,6 +167,36 @@ def _test_voyage(key: str) -> tuple[bool, str]:
         return False, str(exc)[:120]
 
 
+def _list_aws_profiles() -> list[str]:
+    """Return AWS CLI profile names found in ~/.aws/credentials and ~/.aws/config."""
+    import configparser
+
+    profiles: list[str] = []
+
+    cred_path = Path.home() / ".aws" / "credentials"
+    if cred_path.exists():
+        cp = configparser.ConfigParser()
+        try:
+            cp.read(cred_path)
+            profiles.extend(cp.sections())
+        except Exception:
+            pass
+
+    config_path = Path.home() / ".aws" / "config"
+    if config_path.exists():
+        cp = configparser.ConfigParser()
+        try:
+            cp.read(config_path)
+            for section in cp.sections():
+                name = section[8:] if section.startswith("profile ") else section
+                if name not in profiles:
+                    profiles.append(name)
+        except Exception:
+            pass
+
+    return profiles
+
+
 def _test_aws(profile: str = "", region: str = "") -> tuple[bool, str]:
     cmd = ["aws", "sts", "get-caller-identity", "--output", "text"]
     if profile:
@@ -372,7 +402,12 @@ class SetupWizard:
         console.print("  [2] Access Keys + Secret [dim](less secure)[/dim]")
         console.print("  [3] Skip — already configured / use existing kubeconfig")
         console.print()
-        choice = _ask("Choose", default="1")
+
+        while True:
+            choice = _ask("Choose", default="1")
+            if choice in ("1", "2", "3"):
+                break
+            console.print(f"  {_FAIL} Please enter 1, 2, or 3.")
 
         if choice == "1":
             self._aws_profile()
@@ -386,7 +421,41 @@ class SetupWizard:
             self._record("Kubernetes", ok, detail)
 
     def _aws_profile(self) -> None:
-        profile = _ask("AWS profile name", default="agentic-os")
+        profiles = _list_aws_profiles()
+
+        if profiles:
+            console.print("  Found AWS profiles on this machine:")
+            for i, p in enumerate(profiles, 1):
+                console.print(f"    [{i}] {p}")
+            console.print(f"    [n] Create a new profile")
+            console.print()
+            pick = _ask("Pick a number, or 'n' for new", default="1")
+            if pick.isdigit() and 1 <= int(pick) <= len(profiles):
+                profile = profiles[int(pick) - 1]
+            elif pick.lower() == "n":
+                profile = _ask("New profile name", default="agentic-os")
+            else:
+                profile = pick  # they typed a name directly
+        else:
+            console.print(
+                f"  {_WARN} No AWS CLI profiles found on this machine.\n"
+                "  [dim]You'll need an AWS Access Key — IAM Console → Users → "
+                "Security credentials → Create access key.[/dim]"
+            )
+            profile = _ask("Name for a new profile", default="agentic-os")
+
+        if profile not in profiles:
+            console.print(f"\n  Profile '{profile}' doesn't exist yet.")
+            if _confirm(f"  Run 'aws configure --profile {profile}' now?", default=True):
+                subprocess.run(["aws", "configure", "--profile", profile])
+            else:
+                console.print(
+                    f"  {_SKIP} Skipped — run it yourself later: "
+                    f"aws configure --profile {profile}"
+                )
+                self._record("AWS", False, "profile not configured")
+                return
+
         region  = _ask("AWS region", default="ap-south-1")
         cluster = _ask("EKS cluster name (leave blank to skip EKS)", default="")
 
