@@ -382,14 +382,15 @@ class TLSSecretInfo(BaseModel):
 
 
 class CertInfo(BaseModel):
-    name:      str
-    namespace: str
-    domain:    str    = ""
-    ready:     bool   = False
-    status:    str    = ""
-    message:   str    = ""
-    expiry:    str    = ""
-    issuer:    str    = ""
+    name:        str
+    namespace:   str
+    domain:      str    = ""
+    ready:       bool   = False
+    status:      str    = ""
+    message:     str    = ""
+    expiry:      str    = ""
+    issuer:      str    = ""
+    secret_name: str    = ""
 
 
 class TLSMonitorDiagnosis(BaseModel):

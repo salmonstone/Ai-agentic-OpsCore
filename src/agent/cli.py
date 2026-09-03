@@ -5670,9 +5670,9 @@ def tls_monitor(
 def _domain_tls_deep_check(domain: str, namespace_hint: str | None) -> dict:
     """Collect full TLS data for one domain and run Claude diagnosis."""
     import asyncio
-    import json as _json
 
     from agent.core import llm
+    from agent.core.parsing import LLMParseError, parse_llm_json
     from agent.integrations.kubectl import (
         get_all_ingresses,
         get_cert_manager_certificates,
@@ -5687,7 +5687,11 @@ def _domain_tls_deep_check(domain: str, namespace_hint: str | None) -> dict:
         candidates = [i for i in candidates if i.namespace == namespace_hint] or candidates
     if not candidates:
         return {"found": False, "error": f"No Ingress found for domain '{domain}'"}
-    ing = candidates[0]
+    # cert-manager creates a throwaway "cm-acme-http-solver-*" ingress while an
+    # ACME HTTP-01 challenge is in flight — prefer the real ingress over it so
+    # the diagnosis is based on the actual TLS config, not the solver stub.
+    real_candidates = [i for i in candidates if not i.name.startswith("cm-acme-http-solver-")]
+    ing = (real_candidates or candidates)[0]
 
     si  = get_tls_secret(ing.tls_secret, ing.namespace) if ing.tls_secret and ing.tls_enabled else None
     cm_certs = get_cert_manager_certificates()
@@ -5720,25 +5724,54 @@ Certificate:
     if cm:
         prompt += f"""
 cert-manager Certificate:
-  ready:   {cm.ready}
-  status:  {cm.status}
-  message: {cm.message}
-  expiry:  {cm.expiry}
-  issuer:  {cm.issuer}
+  name:       {cm.name}
+  namespace:  {cm.namespace}
+  secretName: {cm.secret_name or 'none'}
+  ready:      {cm.ready}
+  status:     {cm.status}
+  message:    {cm.message}
+  expiry:     {cm.expiry}
+  issuer:     {cm.issuer}
 """
+        if cm.namespace != ing.namespace:
+            prompt += (
+                f"\nNAMESPACE MISMATCH: the Certificate lives in namespace "
+                f"'{cm.namespace}' but the Ingress is in '{ing.namespace}'. "
+                f"cert-manager creates the resulting Secret in the Certificate's "
+                f"own namespace ('{cm.namespace}'), so the Ingress in "
+                f"'{ing.namespace}' can never reference it (Kubernetes Secrets "
+                f"are namespace-scoped and Ingress TLS can't reference a Secret "
+                f"in another namespace). This is very likely the actual root "
+                f"cause — not a missing Secret.\n"
+            )
+        if cm.secret_name and ing.tls_secret and cm.secret_name != ing.tls_secret:
+            prompt += (
+                f"\nSECRET NAME MISMATCH: the Certificate targets Secret "
+                f"'{cm.secret_name}' but the Ingress's tls.secretName is "
+                f"'{ing.tls_secret}' — they must match exactly.\n"
+            )
 
     prompt += f"\nAvailable ClusterIssuers: {issuers or ['none']}\n"
     prompt += """
 Return JSON:
 {
-  "problem_type": "CertExpired|CertExpiringSoon|SecretMissing|CertificateNotReady|AcmeChallengeFailing|NoTLSConfigured|Healthy|Unknown",
+  "problem_type": "CertExpired|CertExpiringSoon|SecretMissing|CertificateNotReady|NamespaceMismatch|AcmeChallengeFailing|NoTLSConfigured|Healthy|Unknown",
   "root_cause": "...",
   "ai_analysis": "...",
   "suggested_fix": "...",
   "fix_command": "kubectl ... or null",
   "fix_type": "restart_cert|delete_secret|apply_manifest|none",
   "confidence": "high|medium|low"
-}"""
+}
+If a NAMESPACE MISMATCH or SECRET NAME MISMATCH is noted above, that is the
+real root cause — prefer it over generic "Secret does not exist" messaging.
+fix_command must be the COMPLETE end-to-end fix, not just one step: if TLS
+Enabled is False on the Ingress, chain a `kubectl patch ingress ... --type
+merge -p '{"spec":{"tls":[...]}}'` (using the Ingress's own existing host
+and secretName that the Certificate will produce) together with whatever
+Certificate/namespace fix is needed, using && between steps. The Ingress
+will not serve TLS from a correctly-issued certificate unless its own
+spec.tls block references the matching secretName."""
 
     try:
         raw  = asyncio.run(llm.chat(
@@ -5747,11 +5780,21 @@ Return JSON:
             json_mode=True,
             max_tokens=600,
         ))
-        diag = _json.loads(raw.content.strip())
-    except Exception:
+        diag = parse_llm_json(raw.content)
+    except LLMParseError as exc:
         diag = {
             "problem_type": "Unknown",
-            "root_cause":   "LLM unavailable",
+            "root_cause":   f"Claude's response wasn't valid JSON: {exc.raw[:200]}",
+            "ai_analysis":  "",
+            "suggested_fix": "Check cluster manually",
+            "fix_command":  None,
+            "fix_type":     "none",
+            "confidence":   "low",
+        }
+    except Exception as exc:
+        diag = {
+            "problem_type": "Unknown",
+            "root_cause":   f"LLM call failed: {exc}",
             "ai_analysis":  "",
             "suggested_fix": "Check cluster manually",
             "fix_command":  None,
@@ -6023,10 +6066,13 @@ def _apply_tls_domain_fix(data: dict, con) -> None:
 
     from agent.integrations.kubectl import apply_fix, run_tls_fix
 
-    if fix_type in ("restart_cert", "delete_secret", "annotate_ingress", "apply_manifest"):
+    # Only dispatch to run_tls_fix() for fix_types whose required params we
+    # actually have here (restart_cert/annotate_ingress just need name+namespace).
+    # Everything else — apply_manifest, delete_secret, multi-step commands —
+    # runs the LLM's actual fix_command directly via apply_fix(), which
+    # already carries the real resource names/namespaces/YAML it diagnosed.
+    if fix_type in ("restart_cert", "annotate_ingress") and fix_cmd:
         params = {"namespace": ing.namespace, "ingress": ing.name, "name": ing.tls_secret or ""}
-        if fix_type == "delete_secret":
-            params["name"] = ing.tls_secret or ""
         with con.status("[bold yellow]Applying fix...[/bold yellow]", spinner="dots"):
             result = run_tls_fix(fix_type, params)
     else:

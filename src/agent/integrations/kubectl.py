@@ -905,22 +905,121 @@ def get_cluster_overview() -> ClusterOverview:
     )
 
 
+_HEREDOC_RE = re.compile(r"<<-?\s*'?\"?(\w+)'?\"?\s*\n(.*?)\n\1\b", re.DOTALL)
+
+
+def _split_fix_steps(command: str) -> list[str]:
+    """
+    Split a fix command on top-level '&&', keeping any <<'EOF' ... EOF heredoc
+    block intact as a single step (it may itself contain literal text that
+    isn't meant to be split on).
+    """
+    text = command.strip()
+    m = _HEREDOC_RE.search(text)
+    if not m:
+        return [s.strip() for s in text.split("&&") if s.strip()]
+
+    placeholder = "\x00HEREDOC\x00"
+    marked = text[:m.start()] + placeholder + text[m.end():]
+    steps = []
+    for part in marked.split("&&"):
+        part = part.strip()
+        if not part:
+            continue
+        if placeholder in part:
+            part = part.replace(placeholder, text[m.start():m.end()])
+        steps.append(part)
+    return steps
+
+
+def run_kubectl_stdin(command: list[str], stdin_text: str, timeout: int = _TIMEOUT) -> KubectlResult:
+    """Like run_kubectl(), but pipes stdin_text to the process (e.g. `kubectl apply -f -`)."""
+    if not command or command[0] != "kubectl":
+        command = ["kubectl"] + command
+    if not shutil.which("kubectl"):
+        return KubectlResult(
+            command=command, output="",
+            error="kubectl not found on PATH. Install it: https://kubernetes.io/docs/tasks/tools/",
+            success=False, duration_ms=0.0,
+        )
+
+    t0 = time.perf_counter()
+    try:
+        proc = subprocess.run(
+            command, input=stdin_text, capture_output=True, text=True, timeout=timeout,
+        )
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return KubectlResult(
+            command=command, output=proc.stdout, error=proc.stderr,
+            success=proc.returncode == 0, duration_ms=duration_ms,
+        )
+    except subprocess.TimeoutExpired:
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return KubectlResult(
+            command=command, output="", error=f"kubectl timed out after {timeout}s",
+            success=False, duration_ms=duration_ms,
+        )
+    except Exception as exc:
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return KubectlResult(command=command, output="", error=str(exc), success=False, duration_ms=duration_ms)
+
+
+def _run_fix_step(step: str) -> KubectlResult:
+    import shlex
+
+    heredoc_m = _HEREDOC_RE.search(step)
+    if heredoc_m:
+        pre_cmd = step[:heredoc_m.start()].strip()
+        body    = heredoc_m.group(2)
+        try:
+            parts = shlex.split(pre_cmd)
+        except ValueError:
+            parts = pre_cmd.split()
+        if parts and parts[0] == "kubectl":
+            parts = parts[1:]
+        return run_kubectl_stdin(parts, body)
+
+    try:
+        parts = shlex.split(step)
+    except ValueError:
+        parts = step.split()
+    if parts and parts[0] == "kubectl":
+        parts = parts[1:]
+    return run_kubectl(parts)
+
+
 def apply_fix(command: str) -> KubectlResult:
     """
     Run a kubectl fix command suggested by the AI.
-    Uses shlex.split so quoted JSON arguments (e.g. -p '[...]') are kept intact.
+
+    Supports a single command (the common case — uses shlex.split so quoted
+    JSON arguments like -p '[...]' are kept intact), '&&'-chained multi-step
+    commands, and a `kubectl apply -f - <<'EOF' ... EOF` heredoc step (piped
+    to kubectl's stdin rather than relying on shell heredoc syntax, since
+    this must also work on Windows where cmd.exe doesn't support heredocs).
+    Runs steps in order and stops at the first failure.
     """
-    import shlex
-    try:
-        parts = shlex.split(command.strip())
-    except ValueError:
-        parts = command.strip().split()
-
-    if parts and parts[0] == "kubectl":
-        parts = parts[1:]
-
     log.info("kubectl.apply_fix", command=command)
-    return run_kubectl(parts)
+    steps = _split_fix_steps(command)
+
+    outputs: list[str] = []
+    total_ms = 0.0
+    last: KubectlResult | None = None
+    for step in steps:
+        result = _run_fix_step(step)
+        outputs.append(result.output)
+        total_ms += result.duration_ms
+        if not result.success:
+            return KubectlResult(
+                command=result.command, output="\n".join(outputs),
+                error=result.error, success=False, duration_ms=total_ms,
+            )
+        last = result
+
+    return KubectlResult(
+        command=last.command if last else [], output="\n".join(outputs),
+        error="", success=True, duration_ms=total_ms,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1504,14 +1603,15 @@ def get_cert_manager_certificates() -> list[CertInfo]:
             issuer   = spec.get("issuerRef", {}).get("name", "")
 
             results.append(CertInfo(
-                name      = meta["name"],
-                namespace = meta["namespace"],
-                domain    = domain,
-                ready     = ready,
-                status    = "Ready" if ready else "NotReady",
-                message   = message,
-                expiry    = expiry,
-                issuer    = issuer,
+                name        = meta["name"],
+                namespace   = meta["namespace"],
+                domain      = domain,
+                ready       = ready,
+                status      = "Ready" if ready else "NotReady",
+                message     = message,
+                expiry      = expiry,
+                issuer      = issuer,
+                secret_name = spec.get("secretName", ""),
             ))
     except (json.JSONDecodeError, KeyError) as e:
         log.error("get_cert_manager_certificates.parse_error", error=str(e))
