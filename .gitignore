@@ -4,10 +4,17 @@ data/gmail_credentials.json
 data/gmail_token.json
 
 # Personal data / generated at runtime
-data/memory.db
+data/*.db
+data/*.log
+data/*.pid
+data/*_stdout.txt
+data/*_stderr.txt
 data/vault/*
 !data/vault/.gitkeep
+data/webhook_mappings.yaml
+data/_*.py
 chroma_db/
+project_scan.json
 
 # Python
 __pycache__/
@@ -20,12 +27,16 @@ dist/
 build/
 .pytest_cache/
 
+# Node
+node_modules/
+
 # IDE / tool dirs
 .claude/
 .sixth/
 .qodo/
 .vscode/
 .idea/
+*.code-workspace
 
 # OS
 .DS_Store
