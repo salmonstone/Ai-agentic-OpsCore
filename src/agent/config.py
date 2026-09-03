@@ -33,6 +33,38 @@ class Settings(BaseSettings):
     resource_watch_interval:    int = 30
     resource_snapshot_interval: int = 300
 
+    # Slack alerts (set SLACK_WEBHOOK_URL to enable)
+    slack_webhook_url:        str  = ""
+    slack_default_channel:    str  = "#alerts"
+    slack_critical_channel:   str  = "#incidents"
+    slack_enabled:            bool = False
+    slack_alert_on_warning:   bool = False   # True = also send warning-level alerts
+    slack_alert_on_recovery:  bool = True    # True = notify when critical clears
+    alert_cooldown_minutes:   int  = 30
+    alert_send_resolved:      bool = True
+
+    # Cost analysis
+    ec2_region:           str = "us-east-1"
+    hours_per_month:      int = 730
+    cost_waste_threshold: int = 50    # flag if waste exceeds this %
+    aws_cost_days:        int = 30
+
+    # GitHub webhook + deployment automation
+    github_webhook_secret:       str  = ""
+    webhook_port:                int  = 8080
+    webhook_host:                str  = "0.0.0.0"
+    webhook_mappings_file:       str  = "data/webhook_mappings.yaml"
+    deploy_watch_seconds:        int  = 120
+    deploy_cooldown_minutes:     int  = 10
+    deploy_pending_expiry_hours: int  = 1
+    auto_approve_low_risk:       bool = False
+    slack_signing_secret:        str  = ""
+
+    # PagerDuty / OpsGenie on-call paging
+    pagerduty_routing_key:  str = ""   # Events API v2 routing key
+    opsgenie_api_key:       str = ""   # OpsGenie Alerts API key
+    opsgenie_region:        str = "us" # "us" or "eu"
+
 
 # Lazy singleton — never raises on import, even without .env
 try:
@@ -54,4 +86,28 @@ except Exception:
         resource_mem_critical=90,
         resource_watch_interval=30,
         resource_snapshot_interval=300,
+        slack_webhook_url="",
+        slack_default_channel="#alerts",
+        slack_critical_channel="#incidents",
+        slack_enabled=False,
+        slack_alert_on_warning=False,
+        slack_alert_on_recovery=True,
+        alert_cooldown_minutes=30,
+        alert_send_resolved=True,
+        ec2_region="us-east-1",
+        hours_per_month=730,
+        cost_waste_threshold=50,
+        aws_cost_days=30,
+        github_webhook_secret="",
+        webhook_port=8080,
+        webhook_host="0.0.0.0",
+        webhook_mappings_file="data/webhook_mappings.yaml",
+        deploy_watch_seconds=120,
+        deploy_cooldown_minutes=10,
+        deploy_pending_expiry_hours=1,
+        auto_approve_low_risk=False,
+        slack_signing_secret="",
+        pagerduty_routing_key="",
+        opsgenie_api_key="",
+        opsgenie_region="us",
     )

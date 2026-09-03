@@ -588,3 +588,462 @@ class ResourceReport(BaseModel):
     pods_without_limits: list[str]                  = Field(default_factory=list)
     claude_analysis:     str                        = ""
     generated_at:        str                        = ""
+
+
+# ---------------------------------------------------------------------------
+# Security audit
+# ---------------------------------------------------------------------------
+
+class SecurityFinding(BaseModel):
+    id:                str
+    severity:          str            # critical / high / medium / low / info
+    category:          str            # privilege / secret / rbac / network / runtime / exposure
+    title:             str
+    description:       str
+    affected_resource: str
+    namespace:         str            = ""
+    evidence:          str            = ""
+    recommendation:    str            = ""
+    fix_command:       str | None     = None
+    cve_reference:     str | None     = None
+
+
+class SecurityReport(BaseModel):
+    cluster_name:    str                        = ""
+    scan_time:       str                        = ""
+    total_findings:  int                        = 0
+    critical:          int                        = 0
+    high:              int                        = 0
+    medium:            int                        = 0
+    low:               int                        = 0
+    info:              int                        = 0
+    system_components: int                        = 0
+    findings:          list[SecurityFinding]      = Field(default_factory=list)
+    security_score:  int                        = 100
+    production_ready: bool                      = False
+    claude_summary:  str                        = ""
+
+
+# ---------------------------------------------------------------------------
+# Multi-cluster management
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Cost analysis
+# ---------------------------------------------------------------------------
+
+class PodCost(BaseModel):
+    pod:                str
+    namespace:          str
+    deployment:         str
+    cpu_request:        float = 0.0
+    memory_request:     float = 0.0   # GB
+    cpu_actual:         float = 0.0
+    memory_actual:      float = 0.0   # GB
+    node_instance_type: str   = "unknown"
+    est_monthly_cost:   float = 0.0
+    waste_percent:      int   = 0
+    waste_label:        str   = "unknown"  # OK / over-provisioned / under-provisioned
+
+
+class DeploymentCost(BaseModel):
+    deployment:        str
+    namespace:         str
+    pod_count:         int   = 0
+    total_cpu_request: float = 0.0
+    total_cpu_actual:  float = 0.0
+    est_monthly_cost:  float = 0.0
+    waste_percent:     int   = 0
+    waste_label:       str   = "unknown"
+
+
+class NamespaceCost(BaseModel):
+    namespace:        str
+    pod_count:        int   = 0
+    est_monthly_cost: float = 0.0
+
+
+class CostReport(BaseModel):
+    cluster_name:             str                    = ""
+    total_nodes:              int                    = 0
+    total_monthly_node_cost:  float                  = 0.0
+    total_requested_cost:     float                  = 0.0
+    total_waste_cost:         float                  = 0.0
+    waste_percent:            int                    = 0
+    namespaces:               list[NamespaceCost]    = Field(default_factory=list)
+    deployments:              list[DeploymentCost]   = Field(default_factory=list)
+    top_wasteful_pods:        list[PodCost]          = Field(default_factory=list)
+    claude_analysis:          str                    = ""
+    generated_at:             str                    = ""
+
+
+class AWSCostData(BaseModel):
+    period:                   str            = ""
+    total_spend:              float          = 0.0
+    by_service:               dict           = Field(default_factory=dict)
+    daily_average:            float          = 0.0
+    today_estimate:           float          = 0.0
+    ec2_spend:                float          = 0.0
+    k8s_utilization_percent:  int            = 0
+    idle_overhead:            float          = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-cluster management
+# ---------------------------------------------------------------------------
+
+class ClusterContext(BaseModel):
+    name:           str
+    cluster:        str   = ""
+    user:           str   = ""
+    namespace:      str   = "default"
+    is_current:     bool  = False
+    cloud_provider: str   = "unknown"   # aws / gcp / azure / local
+    region:         str   = ""
+    environment:    str   = "unknown"   # dev / staging / prod / testing
+    health:         str   = "unknown"   # healthy / unreachable / unknown
+    node_count:     int   = 0
+    last_used:      str   = ""
+
+
+# ---------------------------------------------------------------------------
+# Pod Log Analysis domain
+# ---------------------------------------------------------------------------
+
+class PodLogs(BaseModel):
+    pod:              str
+    namespace:        str
+    containers:       list[str]        = []
+    current_logs:     dict[str, str]   = Field(default_factory=dict)   # container_name -> log text
+    previous_logs:    dict[str, str]   = Field(default_factory=dict)   # container_name -> log text (crash logs)
+    has_previous:     bool             = False
+    log_lines_count:  int              = 0
+    fetch_errors:     list[str]        = []
+
+
+class ContainerState(BaseModel):
+    name:          str
+    ready:         bool       = False
+    restart_count: int        = 0
+    state:         str        = "unknown"    # running / waiting / terminated
+    last_state:    str        = ""
+    exit_code:     int | None = None
+    reason:        str | None = None         # OOMKilled / Error / Completed / CrashLoopBackOff
+
+
+class LogAnalysis(BaseModel):
+    pod:                  str
+    namespace:            str
+    root_cause:           str        = ""
+    error_type:           str        = "UNKNOWN"   # OOM / CONFIG / NETWORK / CRASH / PERMISSION / UNKNOWN
+    confidence:           str        = "low"       # high / medium / low
+    key_log_lines:        list[str]  = []
+    explanation:          str        = ""
+    suggested_fix:        str        = ""
+    fix_command:          str | None = None
+    related_to_restart:   bool       = False
+    claude_full_analysis: str        = ""
+
+
+# ---------------------------------------------------------------------------
+# Deployment Management domain
+# ---------------------------------------------------------------------------
+
+class DeploymentInfo(BaseModel):
+    name:             str
+    namespace:        str
+    replicas_desired: int           = 0
+    replicas_ready:   int           = 0
+    current_image:    str           = ""
+    containers:       list[str]     = Field(default_factory=list)
+    strategy:         str           = "RollingUpdate"
+    max_surge:        str           = "25%"
+    max_unavailable:  str           = "25%"
+    revision:         int           = 0
+    healthy:          bool          = False
+    labels:           dict[str, str] = Field(default_factory=dict)
+
+
+class Revision(BaseModel):
+    revision_number: int
+    image:           str            = ""
+    change_cause:    str            = "<none>"
+    created_at:      str            = ""
+
+
+class DeploymentAction(BaseModel):
+    action_type:      str           # rollback / scale / deploy / restart
+    deployment:       str
+    namespace:        str
+    current_state:    str           = ""
+    proposed_state:   str           = ""
+    is_safe:          bool          = True
+    risk_level:       str           = "low"       # low / medium / high
+    downtime_estimate: str          = "~0 seconds"
+    warnings:         list[str]     = Field(default_factory=list)
+    claude_analysis:  str           = ""
+    command:          str           = ""
+    is_production:    bool          = False
+
+
+# ---------------------------------------------------------------------------
+# GitHub Webhook models
+# ---------------------------------------------------------------------------
+
+class WebhookMapping(BaseModel):
+    repo:                  str
+    branch:                str  = "main"
+    deployment:            str
+    namespace:             str
+    image_prefix:          str  = ""
+    auto_approve_low_risk: bool = False
+
+
+class WebhookConfig(BaseModel):
+    webhook_secret:        str              = ""
+    auto_approve_low_risk: bool             = False
+    mappings:              list[WebhookMapping] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Webhook event + pending deploy
+# ---------------------------------------------------------------------------
+
+class WebhookEvent(BaseModel):
+    repo:            str
+    branch:          str
+    commit_sha:      str
+    commit_message:  str
+    author:          str
+    files_changed:   list[str] = Field(default_factory=list)
+    timestamp:       str       = ""
+
+
+class PendingDeploy(BaseModel):
+    id:           str
+    repo:         str
+    branch:       str
+    deployment:   str
+    namespace:    str
+    new_image:    str
+    old_image:    str           = ""
+    risk_score:   int           = 0
+    risk_label:   str           = "low"
+    status:       str           = "pending"   # pending/approved/rejected/deployed/failed
+    created_at:   str           = ""
+    approved_at:  str | None    = None
+    deployed_at:  str | None    = None
+    commit_sha:   str           = ""
+    author:       str           = ""
+    commit_message: str         = ""
+
+
+# ---------------------------------------------------------------------------
+# Health gate
+# ---------------------------------------------------------------------------
+
+class CheckResult(BaseModel):
+    name:     str
+    passed:   bool
+    severity: str   = "pass"   # pass / warn / block
+    message:  str   = ""
+    detail:   str   = ""
+
+
+class HealthGateResult(BaseModel):
+    passed:           bool
+    blocked:          bool
+    checks:           list[CheckResult]    = Field(default_factory=list)
+    warnings:         list[str]            = Field(default_factory=list)
+    blockers:         list[str]            = Field(default_factory=list)
+    recommendation:   str                  = ""
+    check_duration_ms: int                 = 0
+
+
+# ---------------------------------------------------------------------------
+# Risk scorer
+# ---------------------------------------------------------------------------
+
+class RiskScore(BaseModel):
+    total:          int
+    label:          str                             # low/medium/high/critical
+    factors:        list[tuple[str, int]]           = Field(default_factory=list)
+    recommendation: str                             = ""
+    auto_approve:   bool                            = False
+
+
+# ---------------------------------------------------------------------------
+# Post-deploy watcher
+# ---------------------------------------------------------------------------
+
+class WatchSample(BaseModel):
+    elapsed_s:    int
+    ready_count:  int
+    total_count:  int
+    restart_delta: int   = 0
+    error_lines:  int    = 0
+    memory_mi:    int    = 0
+    event:        str    = ""   # "" / "warn" / "rollback"
+    message:      str    = ""
+
+
+class WatchResult(BaseModel):
+    success:              bool
+    rollback_triggered:   bool              = False
+    rollback_reason:      str | None        = None
+    samples:              list[WatchSample] = Field(default_factory=list)
+    final_ready_count:    int               = 0
+    errors_detected:      int               = 0
+    memory_delta_percent: int               = 0
+    restart_count:        int               = 0
+    duration_seconds:     int               = 0
+
+
+# ---------------------------------------------------------------------------
+# Deploy report
+# ---------------------------------------------------------------------------
+
+class DeployReport(BaseModel):
+    id:                 str
+    deployment:         str
+    namespace:          str
+    status:             str       # SUCCESS / FAILED / ROLLED_BACK
+    old_image:          str       = ""
+    new_image:          str       = ""
+    risk_level:         str       = "low"
+    duration_seconds:   int       = 0
+    pods_healthy:       int       = 0
+    errors_detected:    int       = 0
+    rollback_triggered: bool      = False
+    claude_summary:     str       = ""
+    timestamp:          str       = ""
+
+
+# ── AWS Cost Optimization ──────────────────────────────────────────────────
+
+class CostFix(BaseModel):
+    id: str
+    category: str
+    title: str
+    description: str
+    monthly_savings: float
+    annual_savings: float = 0.0
+    effort: str          # easy / medium / hard
+    risk: str            # safe / low / medium / high
+    fix_type: str        # aws_cli / console / automatic
+    fix_command: str | None = None
+    auto_fixable: bool = False
+    aws_resource_id: str | None = None
+    priority: int = 0
+    roi_score: float = 0.0
+
+    def model_post_init(self, __context):
+        if self.annual_savings == 0.0:
+            self.annual_savings = round(self.monthly_savings * 12, 2)
+
+
+class IdleResources(BaseModel):
+    unattached_volumes: list[dict] = []
+    unused_eips: list[dict] = []
+    old_snapshots: list[dict] = []
+    idle_load_balancers: list[dict] = []
+    stopped_instances: list[dict] = []
+    total_monthly_waste: float = 0.0
+
+
+class AWSCostAnalysis(BaseModel):
+    period_days: int = 30
+    total_spend: float = 0.0
+    last_month_spend: float = 0.0
+    month_change_percent: float = 0.0
+    forecast_this_month: float = 0.0
+    by_service: dict = {}
+    idle_resources: IdleResources = Field(default_factory=IdleResources)
+    ebs_opportunities: list[dict] = []
+    cloudwatch_logs: dict = {}
+    ecr_waste: dict = {}
+    rightsizing: list[dict] = []
+    reserved_vs_ondemand: dict = {}
+    total_monthly_waste: float = 0.0
+    savings_plan: list[CostFix] = []
+    anomalies: dict = {}
+    savings_plans: dict = {}
+    cost_by_tag: dict = {}
+    claude_analysis: str = ""
+    generated_at: str = ""
+
+
+# ── Terraform (IaC) scan ────────────────────────────────────────────────────
+
+class TfResource(BaseModel):
+    """One resource block found in the .tf files."""
+    address: str                      # e.g. aws_instance.web
+    type: str                         # aws_instance
+    name: str                         # web
+    file: str = ""
+    line: int = 0
+    provider: str = ""                # aws / google / azurerm …
+    stateful: bool = False            # holds data — destroy/recreate loses it
+
+
+class TfFinding(BaseModel):
+    """A security / risk / cost concern about the configuration."""
+    id: str
+    severity: str                     # critical / high / medium / low / info
+    category: str                     # security / cost / blast-radius / reliability
+    title: str
+    description: str
+    resource: str = ""                # affected resource address
+    file: str = ""
+    line: int = 0
+    evidence: str = ""                # the offending attribute/value
+    recommendation: str = ""
+    auto_fixable: bool = False        # can the .tf patcher fix it safely?
+    fix_attribute: str | None = None  # attribute the patcher would add, e.g. encrypted = true
+
+
+class TfCostItem(BaseModel):
+    """Estimated monthly cost for a single billable resource."""
+    resource: str
+    type: str
+    detail: str = ""                  # instance type, size, etc.
+    monthly_cost: float = 0.0
+    assumptions: str = ""             # what we assumed (region, hours, count)
+
+
+class TfModule(BaseModel):
+    """A module block — usually where the real infrastructure lives."""
+    name: str
+    source: str = ""
+    version: str = ""
+    pinned: bool = False              # version constrained / git ref present
+    local: bool = False               # local path source (./modules/x)
+    file: str = ""
+    line: int = 0
+
+
+class TerraformReport(BaseModel):
+    root: str = ""
+    file_count: int = 0
+    resource_count: int = 0
+    providers: list[str] = Field(default_factory=list)
+    resources: list[TfResource] = Field(default_factory=list)
+    modules: list[TfModule] = Field(default_factory=list)
+    findings: list[TfFinding] = Field(default_factory=list)
+    cost_items: list[TfCostItem] = Field(default_factory=list)
+    estimated_monthly_cost: float = 0.0
+    plan_actions: dict = Field(default_factory=dict)   # create/update/delete/replace counts
+    replace_addresses: list[str] = Field(default_factory=list)
+    security_score: int = 100
+    remote_state: bool = False        # backend configured (vs local state)
+    parse_errors: list[str] = Field(default_factory=list)
+    claude_summary: str = ""
+    generated_at: str = ""
+
+    @property
+    def critical_count(self) -> int:
+        return sum(1 for f in self.findings if f.severity == "critical")
+
+    @property
+    def high_count(self) -> int:
+        return sum(1 for f in self.findings if f.severity == "high")
