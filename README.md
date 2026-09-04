@@ -63,7 +63,15 @@ agent k8s full-scan --fix   # Auto-remediate issues found
 ```bash
 agent aws list              # Show EC2, EIPs, load balancers, security groups
 agent aws list --fix        # Fix flagged issues (open SGs, unattached EIPs)
+agent aws auth-status       # Show current AWS auth method and verify it works
+agent aws switch-auth       # Switch between IAM Role / Access Key / SSO Profile
 ```
+
+AtlasOS supports three AWS authentication methods — IAM Role (recommended for
+EC2/EKS), Access Keys (local dev), and SSO Profile. `agent setup` walks you
+through picking one. See [deployment/local/README.md](deployment/local/README.md)
+for local setups and [deployment/hosted/README.md](deployment/hosted/README.md)
+for running on EC2/EKS with an IAM role.
 
 ### TLS / Ingress
 
@@ -133,11 +141,14 @@ All settings are stored in `.env` in the project root. `agent setup` manages thi
 ```env
 ANTHROPIC_API_KEY=sk-ant-...
 VOYAGE_API_KEY=pa-...          # Semantic memory search
-AWS_PROFILE=my-profile          # AWS named profile
-AWS_DEFAULT_REGION=ap-south-1
+AWS_AUTH_METHOD=iam_role        # iam_role (default) | access_key | sso_profile
+AWS_REGION=ap-south-1
+EKS_CLUSTER_NAME=my-cluster
 LLM_MODEL=claude-haiku-4-5-20251001
 LLM_EXPENSIVE_MODEL=claude-opus-4-8
 ```
+
+See [Configuration → AWS](deployment/local/README.md) for the other two auth methods.
 
 ## Architecture
 
