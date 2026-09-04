@@ -198,6 +198,21 @@ def _list_aws_profiles() -> list[str]:
     return profiles
 
 
+def _find_working_profile() -> str | None:
+    """Return the first AWS CLI profile with valid credentials, or None.
+
+    Bootstrapping IAM Identity Center via its APIs (sso-admin/identitystore)
+    needs SOME working AWS credentials to call them with — there's no way to
+    call AWS APIs with zero prior credentials. Any already-working profile
+    (however it authenticates) is fine for this one-time provisioning step.
+    """
+    for p in _list_aws_profiles():
+        ok, _ = _run(["aws", "sts", "get-caller-identity", "--profile", p, "--output", "text"], timeout=15)
+        if ok:
+            return p
+    return None
+
+
 def _test_kubectl() -> tuple[bool, str]:
     ok, out = _run(["kubectl", "get", "nodes", "--no-headers"], timeout=15)
     if ok:
@@ -478,6 +493,186 @@ class SetupWizard:
 
         self._verify_aws_setup("Access Key", region, cluster)
 
+    def _bootstrap_sso_backend(self) -> bool:
+        """
+        Auto-provision what `aws configure sso` needs before it can work:
+        an IAM Identity Center instance (standalone accounts only — member
+        accounts in an AWS Organization need an org admin instead), a
+        permission set, and an account assignment for the caller.
+
+        Uses whatever AWS credentials already work (any existing profile) to
+        call the sso-admin/identitystore APIs — there is no way to bootstrap
+        this with zero prior AWS credentials. The one thing that can't be
+        automated at all: the AWS access portal URL has no API, so the user
+        still grabs that from the console once, no matter what.
+
+        Returns True if the instance + permission set are ready (even if the
+        user/assignment step needs manual finishing), False only when there
+        were no working credentials to bootstrap with at all.
+        """
+        console.print()
+        console.print("  [bold]Checking IAM Identity Center...[/bold]")
+
+        bootstrap_profile = _find_working_profile()
+        if not bootstrap_profile:
+            console.print(
+                f"  {_WARN} No working AWS credentials found to provision this automatically.\n"
+                "  [dim]Set up an Access Key first (this wizard's Access Key option), "
+                "then re-run 'agent aws switch-auth' to add SSO on top of it.[/dim]"
+            )
+            return False
+
+        console.print(f"  [dim]Using existing profile '{bootstrap_profile}' to provision Identity Center...[/dim]")
+
+        # 1. Identity Center instance
+        ok, out = _run(["aws", "sso-admin", "list-instances", "--profile", bootstrap_profile,
+                         "--output", "json"], timeout=15)
+        instances = []
+        if ok:
+            try:
+                instances = json.loads(out).get("Instances", [])
+            except Exception:
+                pass
+
+        if instances:
+            instance_arn       = instances[0]["InstanceArn"]
+            identity_store_id  = instances[0]["IdentityStoreId"]
+            console.print(f"  {_OK} IAM Identity Center already enabled")
+        else:
+            console.print("  [cyan]Enabling IAM Identity Center (standalone account)...[/cyan]")
+            ok2, out2 = _run(["aws", "sso-admin", "create-instance", "--profile", bootstrap_profile,
+                               "--output", "json"], timeout=30)
+            if not ok2:
+                console.print(f"  {_FAIL} Couldn't enable Identity Center: {out2[:200]}")
+                console.print(
+                    "  [dim]If this account is a member of an AWS Organization, only the "
+                    "org admin can enable Identity Center. Otherwise enable it via the "
+                    "console: IAM Identity Center → Enable.[/dim]"
+                )
+                return False
+            try:
+                data2 = json.loads(out2)
+                instance_arn      = data2["InstanceArn"]
+                identity_store_id = data2["IdentityStoreId"]
+            except Exception:
+                console.print(f"  {_FAIL} Unexpected response enabling Identity Center.")
+                return False
+            console.print(f"  {_OK} IAM Identity Center enabled")
+
+        # 2. Permission set
+        ps_name = "AtlasOSAccess"
+        ps_arn: str | None = None
+        ok3, out3 = _run(["aws", "sso-admin", "list-permission-sets", "--instance-arn", instance_arn,
+                           "--profile", bootstrap_profile, "--output", "json"], timeout=15)
+        if ok3:
+            try:
+                for arn in json.loads(out3).get("PermissionSets", []):
+                    ok4, out4 = _run([
+                        "aws", "sso-admin", "describe-permission-set",
+                        "--instance-arn", instance_arn, "--permission-set-arn", arn,
+                        "--profile", bootstrap_profile, "--output", "json",
+                    ], timeout=15)
+                    if ok4 and json.loads(out4).get("PermissionSet", {}).get("Name") == ps_name:
+                        ps_arn = arn
+                        break
+            except Exception:
+                pass
+
+        if ps_arn:
+            console.print(f"  {_OK} Permission set '{ps_name}' already exists")
+        else:
+            console.print(f"  [cyan]Creating permission set '{ps_name}'...[/cyan]")
+            ok5, out5 = _run([
+                "aws", "sso-admin", "create-permission-set",
+                "--instance-arn", instance_arn, "--name", ps_name, "--session-duration", "PT4H",
+                "--profile", bootstrap_profile, "--output", "json",
+            ], timeout=20)
+            if not ok5:
+                console.print(f"  {_FAIL} Couldn't create permission set: {out5[:200]}")
+                return False
+            try:
+                ps_arn = json.loads(out5)["PermissionSet"]["PermissionSetArn"]
+            except Exception:
+                console.print(f"  {_FAIL} Unexpected response creating permission set.")
+                return False
+            ok6, out6 = _run([
+                "aws", "sso-admin", "attach-managed-policy-to-permission-set",
+                "--instance-arn", instance_arn, "--permission-set-arn", ps_arn,
+                "--managed-policy-arn", "arn:aws:iam::aws:policy/AdministratorAccess",
+                "--profile", bootstrap_profile,
+            ], timeout=20)
+            if ok6:
+                console.print(f"  {_OK} Permission set '{ps_name}' created with AdministratorAccess")
+            else:
+                console.print(f"  {_WARN} Permission set created but policy attach failed: {out6[:150]}")
+
+        # 3. Identity Center user + account assignment for the caller
+        email = _ask("Your email (for the Identity Center user)", default="")
+        if not email:
+            console.print(
+                f"  {_SKIP} No email given — skipping user/assignment. "
+                "Add yourself as a user in the console before running 'aws configure sso'."
+            )
+            return True  # instance + permission set are still ready and reusable
+
+        user_id: str | None = None
+        ok7, out7 = _run(["aws", "identitystore", "list-users", "--identity-store-id", identity_store_id,
+                           "--profile", bootstrap_profile, "--output", "json"], timeout=15)
+        if ok7:
+            try:
+                for u in json.loads(out7).get("Users", []):
+                    if any(e.get("Value", "").lower() == email.lower() for e in u.get("Emails", [])):
+                        user_id = u["UserId"]
+                        break
+            except Exception:
+                pass
+
+        if user_id:
+            console.print(f"  {_OK} Identity Center user found for {email}")
+        else:
+            username = email.split("@")[0]
+            console.print(f"  [cyan]Creating Identity Center user for {email}...[/cyan]")
+            ok8, out8 = _run([
+                "aws", "identitystore", "create-user", "--identity-store-id", identity_store_id,
+                "--user-name", username,
+                "--name", f"GivenName={username},FamilyName=user",
+                "--display-name", username,
+                "--emails", f"Value={email},Type=work,Primary=true",
+                "--profile", bootstrap_profile, "--output", "json",
+            ], timeout=20)
+            if not ok8:
+                console.print(f"  {_FAIL} Couldn't create Identity Center user: {out8[:200]}")
+                console.print("  [dim]Add yourself as a user manually in the console, then continue.[/dim]")
+                return True
+            try:
+                user_id = json.loads(out8)["UserId"]
+            except Exception:
+                console.print(f"  {_FAIL} Unexpected response creating user.")
+                return True
+            console.print(f"  {_OK} Identity Center user created")
+
+        acct_ok, acct_out = _run(["aws", "sts", "get-caller-identity", "--profile", bootstrap_profile,
+                                   "--query", "Account", "--output", "text"], timeout=15)
+        account_id = acct_out.strip() if acct_ok else ""
+
+        if account_id and user_id:
+            ok9, out9 = _run([
+                "aws", "sso-admin", "create-account-assignment",
+                "--instance-arn", instance_arn, "--target-id", account_id, "--target-type", "AWS_ACCOUNT",
+                "--permission-set-arn", ps_arn, "--principal-type", "USER", "--principal-id", user_id,
+                "--profile", bootstrap_profile, "--output", "json",
+            ], timeout=20)
+            if ok9 or "conflict" in out9.lower() or "already" in out9.lower():
+                console.print(f"  {_OK} Account access assigned")
+            else:
+                console.print(f"  {_WARN} Account assignment may have failed: {out9[:150]}")
+
+        console.print(
+            f"\n  {_OK} Identity Center is ready. Grab your portal URL from:\n"
+            "  [dim]AWS Console → IAM Identity Center → Dashboard → 'AWS access portal URL'[/dim]\n"
+        )
+        return True
+
     def _setup_sso_profile(self) -> None:
         profiles = _list_aws_profiles()
 
@@ -501,11 +696,18 @@ class SetupWizard:
         just_configured = False
         if profile not in profiles:
             console.print(f"\n  Profile '{profile}' doesn't exist yet.")
+
+            if _confirm(
+                "  Auto-provision IAM Identity Center (permission set + account "
+                "access) now?", default=True,
+            ):
+                self._bootstrap_sso_backend()
+
             if _confirm(f"  Run 'aws configure sso --profile {profile}' now?", default=True):
                 console.print(
-                    "  [dim]This opens a browser to sign in via your organization's SSO. "
-                    "If your org doesn't use IAM Identity Center yet, an admin sets that up "
-                    "once in the AWS SSO console — after that everyone can use this.[/dim]"
+                    "  [dim]This opens a browser to sign in. Need the portal URL? "
+                    "AWS Console → IAM Identity Center → Dashboard → "
+                    "'AWS access portal URL' (top of page).[/dim]"
                 )
                 subprocess.run(["aws", "configure", "sso", "--profile", profile])
                 just_configured = True
