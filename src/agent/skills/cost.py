@@ -20,6 +20,7 @@ from agent.core.models import (
     AWSCostAnalysis, AWSCostData, CostFix, CostReport, DeploymentCost,
     IdleResources, NamespaceCost, PodCost,
 )
+from agent.integrations.aws import get_aws_client
 from agent.integrations.ec2_pricing import (
     HOURS_PER_MONTH, estimate_hourly_from_cpu, get_instance_price, get_monthly_cost,
 )
@@ -399,7 +400,7 @@ class CostAnalysisSkill(BaseSkill):
         start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
         try:
-            client   = boto3.client("ce")
+            client   = get_aws_client("ce")
             response = client.get_cost_and_usage(
                 TimePeriod  = {"Start": start, "End": end},
                 Granularity = "MONTHLY",
@@ -959,15 +960,15 @@ class CostAnalysisSkill(BaseSkill):
 
         try:
             if fix.category == "cloudwatch":
-                logs = boto3.client("logs")
+                logs = get_aws_client("logs")
                 logs.put_retention_policy(logGroupName=rid, retentionInDays=30)
 
             elif fix.category == "eip":
-                ec2 = boto3.client("ec2")
+                ec2 = get_aws_client("ec2")
                 ec2.release_address(AllocationId=rid)
 
             elif fix.category == "ebs_idle":
-                ec2 = boto3.client("ec2")
+                ec2 = get_aws_client("ec2")
                 # Re-verify the volume is still unattached before deleting.
                 resp = ec2.describe_volumes(VolumeIds=[rid])
                 vols = resp.get("Volumes", [])
@@ -977,11 +978,11 @@ class CostAnalysisSkill(BaseSkill):
                 ec2.delete_volume(VolumeId=rid)
 
             elif fix.category == "ebs_upgrade":
-                ec2 = boto3.client("ec2")
+                ec2 = get_aws_client("ec2")
                 ec2.modify_volume(VolumeId=rid, VolumeType="gp3")
 
             elif fix.category == "ecr":
-                ecr = boto3.client("ecr")
+                ecr = get_aws_client("ecr")
                 # aws_resource_id is "repo/sha256:digest"
                 repo, _, digest = rid.partition("/")
                 if not repo or not digest:

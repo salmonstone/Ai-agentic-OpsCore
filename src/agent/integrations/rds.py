@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from agent.integrations.aws import get_aws_client
 from agent.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -24,7 +25,7 @@ def _region(region: str | None) -> str:
         return region
     try:
         from agent.config import settings
-        return settings.ec2_region or _DEFAULT_REGION
+        return settings.aws_region or settings.ec2_region or _DEFAULT_REGION
     except Exception:
         return _DEFAULT_REGION
 
@@ -62,7 +63,7 @@ def get_rds_instances(region: str = _DEFAULT_REGION) -> list[dict]:
         return []
 
     try:
-        rds = boto3.client("rds", region_name=region)
+        rds = get_aws_client("rds", region_name=region)
     except Exception as e:
         log.warning("rds.failed", check="rds_client", error=str(e))
         return []
@@ -122,7 +123,7 @@ def get_rds_metrics(instance_id: str, region: str = _DEFAULT_REGION) -> dict:
         return default
 
     try:
-        cw = boto3.client("cloudwatch", region_name=region)
+        cw = get_aws_client("cloudwatch", region_name=region)
     except Exception as e:
         log.warning("rds.failed", check="cloudwatch_client", error=str(e))
         return default
@@ -202,7 +203,7 @@ def get_rds_events(region: str = _DEFAULT_REGION, hours: int = 24) -> list[dict]
         return []
 
     try:
-        rds = boto3.client("rds", region_name=region)
+        rds = get_aws_client("rds", region_name=region)
         result = rds.describe_events(Duration=hours * 60, SourceType="db-instance")
     except ClientError as e:
         if _is_access_denied(e):
@@ -238,7 +239,7 @@ def get_aurora_clusters(region: str = _DEFAULT_REGION) -> list[dict]:
         return []
 
     try:
-        rds = boto3.client("rds", region_name=region)
+        rds = get_aws_client("rds", region_name=region)
         result = rds.describe_db_clusters()
     except ClientError as e:
         if _is_access_denied(e):

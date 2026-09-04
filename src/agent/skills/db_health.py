@@ -1,6 +1,7 @@
 """Database health monitoring skill — RDS/Aurora."""
 from __future__ import annotations
 
+from agent.integrations.aws import get_aws_client
 from agent.integrations.rds import (
     analyze_rds_health,
     get_aurora_clusters,
@@ -168,7 +169,7 @@ def apply_storage_fix(
 
     new_storage = current_storage + additional_gb
     try:
-        rds = boto3.client("rds", region_name=region)
+        rds = get_aws_client("rds", region_name=region)
         rds.modify_db_instance(
             DBInstanceIdentifier=instance_id,
             AllocatedStorage=new_storage,

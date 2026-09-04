@@ -9,6 +9,7 @@ from __future__ import annotations
 import statistics
 from datetime import datetime, timedelta, timezone
 
+from agent.integrations.aws import get_aws_client
 from agent.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -121,7 +122,7 @@ def get_cost_and_usage(days: int = 30) -> dict:
     start = today - timedelta(days=days)
 
     try:
-        ce = boto3.client("ce", region_name=_CE_REGION)
+        ce = get_aws_client("ce", region_name=_CE_REGION)
     except Exception as e:
         log.warning("aws.check_failed", check="cost_explorer_client", error=str(e))
         return default
@@ -249,8 +250,8 @@ def get_ec2_instances() -> list[dict]:
         return []
 
     try:
-        ec2 = boto3.client("ec2")
-        cw = boto3.client("cloudwatch")
+        ec2 = get_aws_client("ec2")
+        cw = get_aws_client("cloudwatch")
     except Exception as e:
         log.warning("aws.check_failed", check="ec2_client", error=str(e))
         return []
@@ -351,7 +352,7 @@ def get_idle_resources() -> dict:
         return result
 
     try:
-        ec2 = boto3.client("ec2")
+        ec2 = get_aws_client("ec2")
     except Exception as e:
         log.warning("aws.check_failed", check="idle_ec2_client", error=str(e))
         ec2 = None
@@ -437,7 +438,7 @@ def get_idle_resources() -> dict:
 
     # --- idle load balancers (no healthy targets) -------------------------
     try:
-        elbv2 = boto3.client("elbv2")
+        elbv2 = get_aws_client("elbv2")
     except Exception as e:
         log.warning("aws.check_failed", check="elbv2_client", error=str(e))
         elbv2 = None
@@ -529,7 +530,7 @@ def get_ebs_optimization() -> list[dict]:
         return []
 
     try:
-        ec2 = boto3.client("ec2")
+        ec2 = get_aws_client("ec2")
         resp = ec2.describe_volumes(
             Filters=[{"Name": "status", "Values": ["in-use"]}]
         )
@@ -577,7 +578,7 @@ def get_cloudwatch_logs_cost() -> dict:
         return default
 
     try:
-        logs = boto3.client("logs")
+        logs = get_aws_client("logs")
     except Exception as e:
         log.warning("aws.check_failed", check="logs_client", error=str(e))
         return default
@@ -638,7 +639,7 @@ def get_ecr_waste() -> dict:
         return default
 
     try:
-        ecr = boto3.client("ecr")
+        ecr = get_aws_client("ecr")
     except Exception as e:
         log.warning("aws.check_failed", check="ecr_client", error=str(e))
         return default
@@ -713,7 +714,7 @@ def get_rightsizing_recommendations() -> list[dict]:
         return []
 
     try:
-        ce = boto3.client("ce", region_name=_CE_REGION)
+        ce = get_aws_client("ce", region_name=_CE_REGION)
         resp = ce.get_rightsizing_recommendation(Service="AmazonEC2")
     except ClientError as e:
         if _is_access_denied(e):
@@ -783,7 +784,7 @@ def get_reserved_vs_ondemand() -> dict:
         return default
 
     try:
-        ce = boto3.client("ce", region_name=_CE_REGION)
+        ce = get_aws_client("ce", region_name=_CE_REGION)
     except Exception as e:
         log.warning("aws.check_failed", check="ce_client_ri", error=str(e))
         return default
@@ -862,7 +863,7 @@ def get_spend_anomalies(days: int = 30) -> dict:
         return default
 
     try:
-        ce = boto3.client("ce", region_name=_CE_REGION)
+        ce = get_aws_client("ce", region_name=_CE_REGION)
     except Exception as e:
         log.warning("aws.check_failed", check="anomalies_ce_client", error=str(e))
         return default
@@ -1009,7 +1010,7 @@ def get_savings_plans_coverage(days: int = 30) -> float:
         return 0.0
 
     try:
-        ce = boto3.client("ce", region_name=_CE_REGION)
+        ce = get_aws_client("ce", region_name=_CE_REGION)
     except Exception as e:
         log.warning("aws.check_failed", check="sp_coverage_client", error=str(e))
         return 0.0
@@ -1087,7 +1088,7 @@ def get_savings_plan_recommendations() -> dict:
         return default
 
     try:
-        ce = boto3.client("ce", region_name=_CE_REGION)
+        ce = get_aws_client("ce", region_name=_CE_REGION)
     except Exception as e:
         log.warning("aws.check_failed", check="sp_rec_client", error=str(e))
         return default
@@ -1186,7 +1187,7 @@ def get_cost_by_tag(tag_key: str = "Environment", days: int = 30) -> dict:
         return default
 
     try:
-        ce = boto3.client("ce", region_name=_CE_REGION)
+        ce = get_aws_client("ce", region_name=_CE_REGION)
     except Exception as e:
         log.warning("aws.check_failed", check="tag_ce_client", error=str(e))
         return default

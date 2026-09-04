@@ -5,10 +5,12 @@ All AWS API calls go through typed helpers here — no raw boto3 elsewhere.
 Never raises exceptions; always returns data or an empty list so callers
 can decide what to do with errors.
 
-Credential resolution uses the standard boto3 chain:
-  1. Environment variables (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
-  2. ~/.aws/credentials
-  3. IAM instance profile / EKS IRSA
+Credential resolution respects settings.aws_auth_method (see config.py /
+get_aws_client() below):
+  - iam_role     (default) — EC2/EKS instance role or local IMDS via the
+                 standard boto3 chain (env vars, ~/.aws/credentials, IMDS)
+  - access_key   — static AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+  - sso_profile  — a named ~/.aws profile (AWS_PROFILE)
 """
 from __future__ import annotations
 
@@ -28,9 +30,45 @@ _TIMEOUT = 30  # seconds per boto3 call
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def get_aws_client(service: str, region_name: str | None = None):
+    """
+    Build a boto3 client for `service` using the configured auth method
+    (settings.aws_auth_method). Drop-in replacement for
+    boto3.client(service, region_name=...) — same signature, same return
+    type — just routed through whichever of the three auth methods the
+    user configured instead of always taking boto3's default session.
+    """
+    from agent.config import settings
+    session = settings.get_aws_session()
+    return session.client(service, region_name=region_name or settings.aws_region)
+
+
 def _boto3_client(service: str, region: str):
-    import boto3
-    return boto3.client(service, region_name=region)
+    return get_aws_client(service, region_name=region)
+
+
+def friendly_aws_error(exc: Exception) -> str:
+    """
+    Translate the handful of AWS auth failures a user is most likely to hit
+    into an actionable message, instead of a raw botocore exception string.
+    Falls back to the raw message for anything else.
+    """
+    text = str(exc)
+    if "NoCredentialsError" in type(exc).__name__ or "Unable to locate credentials" in text:
+        return (
+            "AWS credentials not found.\n"
+            "  Run: agent setup — choose your authentication method.\n"
+            "  If on EC2/EKS: select IAM Role (recommended).\n"
+            "  If local: select Access Keys or SSO Profile."
+        )
+    if "InvalidClientTokenId" in text:
+        return (
+            "AWS Access Key is invalid or expired.\n"
+            "  Run: agent aws switch-auth to reconfigure your credentials."
+        )
+    if "AccessDenied" in text or "AccessDeniedException" in text:
+        return f"AWS permission denied — the configured identity is missing an IAM permission.\n  {text[:200]}"
+    return text[:200]
 
 
 def _safe(fn, *args, label: str = "aws", **kwargs):
@@ -38,7 +76,7 @@ def _safe(fn, *args, label: str = "aws", **kwargs):
     try:
         return fn(*args, **kwargs)
     except Exception as exc:
-        log.warning(f"{label}.error", error=str(exc)[:200])
+        log.warning(f"{label}.error", error=friendly_aws_error(exc))
         return None
 
 

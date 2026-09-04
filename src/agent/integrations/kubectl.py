@@ -34,6 +34,34 @@ _TIMEOUT = 8  # seconds for every kubectl call (reduced from 30 to avoid blockin
 _avail_cache: dict = {"ok": None, "ts": 0.0}
 
 
+def get_kubectl_env() -> dict:
+    """
+    Build the environment for a kubectl subprocess call.
+
+    kubectl's EKS auth (aws eks get-token, spawned by kubectl itself via its
+    exec-credential plugin) inherits whatever env kubectl was given — so
+    this is what makes settings.aws_auth_method actually take effect for
+    kubectl, not just for boto3 calls.
+      - access_key:  inject AWS_ACCESS_KEY_ID/SECRET/DEFAULT_REGION.
+      - sso_profile: inject AWS_PROFILE/DEFAULT_REGION.
+      - iam_role (default): no overrides — the ambient env / instance
+        metadata already resolves credentials on its own.
+    """
+    import os
+    from agent.config import settings
+
+    env = dict(os.environ)
+    if settings.aws_auth_method == "access_key" and settings.aws_access_key_id and settings.aws_secret_access_key:
+        env["AWS_ACCESS_KEY_ID"]     = settings.aws_access_key_id
+        env["AWS_SECRET_ACCESS_KEY"] = settings.aws_secret_access_key
+        env["AWS_DEFAULT_REGION"]    = settings.aws_region
+        env.pop("AWS_PROFILE", None)
+    elif settings.aws_auth_method == "sso_profile" and settings.aws_profile:
+        env["AWS_PROFILE"]        = settings.aws_profile
+        env["AWS_DEFAULT_REGION"] = settings.aws_region
+    return env
+
+
 def is_cluster_available() -> bool:
     """
     Fast cluster reachability check using a TCP socket probe — no subprocess.
@@ -166,7 +194,7 @@ def build_eks_access_fix_hint(context_name: str) -> str:
     try:
         r = subprocess.run(
             ["aws", "sts", "get-caller-identity", "--query", "Arn", "--output", "text"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=get_kubectl_env(),
         )
         if r.returncode == 0:
             identity = r.stdout.strip()
@@ -242,6 +270,7 @@ def run_kubectl(command: list[str], timeout: int = _TIMEOUT) -> KubectlResult:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=get_kubectl_env(),
         )
         duration_ms = round((time.perf_counter() - t0) * 1000, 1)
         success     = proc.returncode == 0
@@ -947,6 +976,7 @@ def run_kubectl_stdin(command: list[str], stdin_text: str, timeout: int = _TIMEO
     try:
         proc = subprocess.run(
             command, input=stdin_text, capture_output=True, text=True, timeout=timeout,
+            env=get_kubectl_env(),
         )
         duration_ms = round((time.perf_counter() - t0) * 1000, 1)
         return KubectlResult(
@@ -2482,7 +2512,7 @@ def get_context_node_count(context_name: str) -> int:
     result = subprocess.run(
         ["kubectl", "get", "nodes", "--no-headers",
          f"--context={context_name}"],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True, text=True, timeout=15, env=get_kubectl_env(),
     )
     if result.returncode != 0:
         return -1
@@ -2499,7 +2529,7 @@ def add_eks_cluster(cluster_name: str, region: str, profile: str = "default") ->
          "--name", cluster_name,
          "--region", region,
          "--profile", profile],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=30, env=get_kubectl_env(),
     )
     success = result.returncode == 0
     if success:

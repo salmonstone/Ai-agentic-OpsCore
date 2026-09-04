@@ -43,6 +43,20 @@ class Settings(BaseSettings):
     alert_cooldown_minutes:   int  = 30
     alert_send_resolved:      bool = True
 
+    # AWS authentication — pick ONE method via aws_auth_method
+    #   "iam_role"    (default, recommended) — EC2/EKS instance role or local
+    #                 IMDS; boto3/aws CLI resolve credentials automatically,
+    #                 nothing else needs to be set.
+    #   "access_key"  — static long-lived credentials (local dev fallback).
+    #   "sso_profile" — a named ~/.aws profile (SSO, role-assumption, or
+    #                   static keys — whatever that profile is backed by).
+    aws_auth_method:       str = "iam_role"
+    aws_region:            str = "us-east-1"
+    eks_cluster_name:      str = ""
+    aws_access_key_id:     str = ""
+    aws_secret_access_key: str = ""
+    aws_profile:           str = ""
+
     # Cost analysis
     ec2_region:           str = "us-east-1"
     hours_per_month:      int = 730
@@ -64,6 +78,32 @@ class Settings(BaseSettings):
     pagerduty_routing_key:  str = ""   # Events API v2 routing key
     opsgenie_api_key:       str = ""   # OpsGenie Alerts API key
     opsgenie_region:        str = "us" # "us" or "eu"
+
+    def get_aws_session(self):
+        """
+        Build a boto3.Session for the configured aws_auth_method.
+
+        - access_key: only used when both key fields are actually set —
+          falls through to the iam_role behavior otherwise, so a half
+          -configured access_key method doesn't hard-fail every AWS call.
+        - sso_profile: only used when aws_profile is actually set, same
+          fallback reasoning.
+        - iam_role (default): Session() with no explicit credentials — boto3
+          resolves them itself (env vars, ~/.aws/credentials default profile,
+          or EC2/EKS instance metadata), which is exactly what "use whatever
+          role this is running as" means.
+        """
+        import boto3
+
+        if self.aws_auth_method == "access_key" and self.aws_access_key_id and self.aws_secret_access_key:
+            return boto3.Session(
+                aws_access_key_id=self.aws_access_key_id,
+                aws_secret_access_key=self.aws_secret_access_key,
+                region_name=self.aws_region,
+            )
+        if self.aws_auth_method == "sso_profile" and self.aws_profile:
+            return boto3.Session(profile_name=self.aws_profile, region_name=self.aws_region)
+        return boto3.Session(region_name=self.aws_region)
 
 
 # Lazy singleton — never raises on import, even without .env
@@ -94,6 +134,12 @@ except Exception:
         slack_alert_on_recovery=True,
         alert_cooldown_minutes=30,
         alert_send_resolved=True,
+        aws_auth_method="iam_role",
+        aws_region="us-east-1",
+        eks_cluster_name="",
+        aws_access_key_id="",
+        aws_secret_access_key="",
+        aws_profile="",
         ec2_region="us-east-1",
         hours_per_month=730,
         cost_waste_threshold=50,
