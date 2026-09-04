@@ -437,21 +437,33 @@ class SetupWizard:
             else:
                 profile = pick  # they typed a name directly
         else:
-            console.print(
-                f"  {_WARN} No AWS CLI profiles found on this machine.\n"
-                "  [dim]You'll need an AWS Access Key — IAM Console → Users → "
-                "Security credentials → Create access key.[/dim]"
-            )
+            console.print(f"  {_WARN} No AWS CLI profiles found on this machine.")
             profile = _ask("Name for a new profile", default="agentic-os")
 
         if profile not in profiles:
-            console.print(f"\n  Profile '{profile}' doesn't exist yet.")
-            if _confirm(f"  Run 'aws configure --profile {profile}' now?", default=True):
+            console.print(f"\n  Profile '{profile}' doesn't exist yet.\n")
+            console.print("  How should it authenticate?\n")
+            console.print("  [1] AWS SSO / IAM Identity Center [bold](recommended)[/bold] "
+                           "[dim]— short-lived, auto-refreshing, no keys stored[/dim]")
+            console.print("  [2] Static access key [dim]— IAM Console → Users → "
+                           "Security credentials → Create access key[/dim]")
+            console.print()
+            auth_choice = _ask("Choose", default="1")
+
+            if auth_choice == "2":
+                console.print(f"  [dim]Running: aws configure --profile {profile}[/dim]")
                 subprocess.run(["aws", "configure", "--profile", profile])
+            elif _confirm(f"  Run 'aws configure sso --profile {profile}' now?", default=True):
+                console.print(
+                    "  [dim]This opens a browser to sign in via your organization's SSO. "
+                    "If your org doesn't use IAM Identity Center yet, an admin sets that up "
+                    "once in the AWS SSO console — after that everyone can use this.[/dim]"
+                )
+                subprocess.run(["aws", "configure", "sso", "--profile", profile])
             else:
                 console.print(
                     f"  {_SKIP} Skipped — run it yourself later: "
-                    f"aws configure --profile {profile}"
+                    f"aws configure sso --profile {profile}  (or 'aws configure' for static keys)"
                 )
                 self._record("AWS", False, "profile not configured")
                 return
