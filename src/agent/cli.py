@@ -4021,6 +4021,102 @@ def _print_aws_diagnosis(diagnosis) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Commands: agent aws auth-status / switch-auth
+# ---------------------------------------------------------------------------
+
+_AWS_METHOD_LABELS = {
+    "iam_role": "IAM Role", "access_key": "Access Key", "sso_profile": "SSO Profile",
+}
+
+
+@aws_app.command("auth-status")
+def aws_auth_status() -> None:
+    """Show the configured AWS auth method and verify it currently works."""
+    from agent.config import settings
+    from agent.integrations.aws import get_aws_client
+
+    console.print()
+    console.print(Rule("[bold cyan]AWS Auth Status[/bold cyan]"))
+    console.print()
+
+    method = _AWS_METHOD_LABELS.get(settings.aws_auth_method, settings.aws_auth_method)
+
+    identity: dict | None = None
+    error = ""
+    try:
+        with console.status("[cyan]Checking AWS identity...[/cyan]", spinner="dots"):
+            identity = get_aws_client("sts").get_caller_identity()
+    except Exception as exc:
+        error = str(exc)
+
+    lines = [f"  Method:    {method}"]
+    if identity:
+        arn = identity.get("Arn", "?")
+        lines += [
+            "  Status:    [bold green]✓ Connected[/bold green]",
+            f"  Identity:  {_escape(arn)}",
+            f"  Account:   {identity.get('Account', '?')}",
+        ]
+    else:
+        lines += [
+            "  Status:    [bold red]✗ Not connected[/bold red]",
+            f"  Error:     {_escape(error[:150])}",
+        ]
+    lines.append(f"  Region:    {settings.aws_region}")
+    if settings.eks_cluster_name:
+        lines.append(f"  Cluster:   {settings.eks_cluster_name}")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold]AWS AUTH STATUS[/bold]",
+        border_style="green" if identity else "red",
+        padding=(1, 2),
+    ))
+    console.print()
+
+    if not identity:
+        if "NoCredentialsError" in error or "Unable to locate credentials" in error:
+            console.print(
+                "  [yellow]AWS credentials not found.[/yellow]\n"
+                "  Run: [bold]agent setup[/bold] — choose your authentication method.\n"
+                "  If on EC2/EKS: select IAM Role (recommended).\n"
+                "  If local: select Access Keys or SSO Profile.\n"
+            )
+        elif "InvalidClientTokenId" in error:
+            console.print(
+                "  [yellow]AWS Access Key is invalid or expired.[/yellow]\n"
+                "  Run: [bold]agent aws switch-auth[/bold] to reconfigure your credentials.\n"
+            )
+        else:
+            console.print(
+                "  [dim]Fix: run[/dim] [bold]agent aws switch-auth[/bold] "
+                "[dim]to reconfigure your credentials.[/dim]\n"
+            )
+        raise typer.Exit(1)
+
+
+@aws_app.command("switch-auth")
+def aws_switch_auth() -> None:
+    """Switch AWS auth method (IAM Role / Access Key / SSO Profile) without running full setup."""
+    console.print()
+    console.print(Rule("[bold cyan]Switch AWS Auth Method[/bold cyan]"))
+    try:
+        import agent.skills.setup as _setup
+
+        _setup._env_cache = _setup._read_env()
+        wizard = _setup.SetupWizard()
+        try:
+            wizard.configure_aws()
+        finally:
+            _setup._flush_env()
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Command: agent aws scan
 # ---------------------------------------------------------------------------
 
@@ -4649,7 +4745,8 @@ def aws_list(
     except typer.Exit:
         raise
     except Exception as e:
-        _print_error(str(e))
+        from agent.integrations.aws import friendly_aws_error
+        _print_error(friendly_aws_error(e))
         raise typer.Exit(1)
 
 

@@ -6,6 +6,7 @@ Writes results to .env safely (never overwrites keys that already work).
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -197,16 +198,6 @@ def _list_aws_profiles() -> list[str]:
     return profiles
 
 
-def _test_aws(profile: str = "", region: str = "") -> tuple[bool, str]:
-    cmd = ["aws", "sts", "get-caller-identity", "--output", "text"]
-    if profile:
-        cmd += ["--profile", profile]
-    if region:
-        cmd += ["--region", region]
-    ok, out = _run(cmd, timeout=20)
-    return ok, out[:120] if ok else out[:120]
-
-
 def _test_kubectl() -> tuple[bool, str]:
     ok, out = _run(["kubectl", "get", "nodes", "--no-headers"], timeout=15)
     if ok:
@@ -392,15 +383,22 @@ class SetupWizard:
     def configure_aws(self) -> None:
         _section("Step 2 — AWS / Kubernetes")
 
+        console.print(
+            "  AtlasOS supports three ways to authenticate with AWS.\n"
+            "  [bold]IAM Role[/bold] is recommended for production and EC2/EKS instances.\n"
+            "  [bold]Access Keys[/bold] work for local development.\n"
+            "  [bold]SSO Profile[/bold] works for teams using AWS SSO.\n"
+        )
+
         if not _confirm("Connect AWS and/or Kubernetes?", default=False):
             console.print(f"  {_SKIP} AWS/K8s skipped")
             return
 
         console.print()
-        console.print("  How do you want to authenticate?\n")
-        console.print("  [1] AWS Named Profile [bold](recommended)[/bold]")
-        console.print("  [2] Access Keys + Secret [dim](less secure)[/dim]")
-        console.print("  [3] Skip — already configured / use existing kubeconfig")
+        console.print("  How is AtlasOS running?\n")
+        console.print("  [1] On an EC2 instance or EKS node — use IAM Role [bold](recommended)[/bold]")
+        console.print("  [2] On my local laptop — use Access Keys or SSO")
+        console.print("  [3] Skip AWS setup for now")
         console.print()
 
         while True:
@@ -410,17 +408,77 @@ class SetupWizard:
             console.print(f"  {_FAIL} Please enter 1, 2, or 3.")
 
         if choice == "1":
-            self._aws_profile()
+            self._setup_iam_role()
         elif choice == "2":
-            self._aws_keys()
+            console.print()
+            console.print("  [1] AWS Access Key + Secret Key")
+            console.print("  [2] AWS SSO Named Profile")
+            console.print()
+            while True:
+                sub = _ask("Choose", default="2")
+                if sub in ("1", "2"):
+                    break
+                console.print(f"  {_FAIL} Please enter 1 or 2.")
+            if sub == "1":
+                self._setup_access_key()
+            else:
+                self._setup_sso_profile()
         else:
-            console.print(f"  {_SKIP} Using existing AWS/kubeconfig")
-            ok, detail = _test_kubectl()
-            icon = _OK if ok else _WARN
-            console.print(f"  {icon} kubectl: {detail}")
-            self._record("Kubernetes", ok, detail)
+            console.print(f"  {_SKIP} AWS setup skipped")
+            self._record("AWS", False, "skipped")
 
-    def _aws_profile(self) -> None:
+    def _setup_iam_role(self) -> None:
+        console.print()
+        console.print(
+            "  [bold]IAM Role authentication[/bold] uses the role already attached\n"
+            "  to your EC2 instance or EKS node.\n"
+            "  No credentials needed. No keys to manage.\n"
+            "  [green]Most secure option.[/green]\n"
+        )
+        region  = _ask("Enter your AWS region (e.g. us-east-1)", default="us-east-1")
+        cluster = _ask("Enter your EKS cluster name", default="")
+
+        _set_env("AWS_AUTH_METHOD", "iam_role")
+        _set_env("AWS_REGION", region)
+        if cluster:
+            _set_env("EKS_CLUSTER_NAME", cluster)
+        # Clear any leftover static-key/profile config so a stale value from
+        # an earlier setup run doesn't silently override the role.
+        _set_env("AWS_ACCESS_KEY_ID", "")
+        _set_env("AWS_SECRET_ACCESS_KEY", "")
+        _set_env("AWS_PROFILE", "")
+
+        self._verify_aws_setup("IAM Role", region, cluster)
+
+    def _setup_access_key(self) -> None:
+        console.print()
+        console.print(
+            f"  {_WARN} [yellow]Access Keys are less secure than IAM Roles.[/yellow]\n"
+            "  Keys will be stored in your .env file.\n"
+            "  [bold red]NEVER commit .env to Git.[/bold red]\n"
+            "  Consider switching to IAM Role when possible (agent aws switch-auth).\n"
+        )
+        access_key = _ask("AWS Access Key ID", password=True)
+        secret_key = _ask("AWS Secret Access Key", password=True)
+        region     = _ask("AWS Region", default="us-east-1")
+        cluster    = _ask("EKS Cluster Name", default="")
+
+        if not access_key or not secret_key:
+            console.print(f"  {_SKIP} Skipped — no key entered")
+            self._record("AWS", False, "no key entered")
+            return
+
+        _set_env("AWS_AUTH_METHOD", "access_key")
+        _set_env("AWS_ACCESS_KEY_ID", access_key)
+        _set_env("AWS_SECRET_ACCESS_KEY", secret_key)
+        _set_env("AWS_REGION", region)
+        if cluster:
+            _set_env("EKS_CLUSTER_NAME", cluster)
+        _set_env("AWS_PROFILE", "")
+
+        self._verify_aws_setup("Access Key", region, cluster)
+
+    def _setup_sso_profile(self) -> None:
         profiles = _list_aws_profiles()
 
         if profiles:
@@ -429,7 +487,7 @@ class SetupWizard:
                 console.print(f"    [{i}] {p}")
             console.print(f"    [n] Create a new profile")
             console.print()
-            pick = _ask("Pick a number, or 'n' for new", default="1")
+            pick = _ask("AWS profile name — pick a number, or 'n' for new", default="1")
             if pick.isdigit() and 1 <= int(pick) <= len(profiles):
                 profile = profiles[int(pick) - 1]
             elif pick.lower() == "n":
@@ -438,112 +496,155 @@ class SetupWizard:
                 profile = pick  # they typed a name directly
         else:
             console.print(f"  {_WARN} No AWS CLI profiles found on this machine.")
-            profile = _ask("Name for a new profile", default="agentic-os")
+            profile = _ask("New profile name (from ~/.aws/config)", default="agentic-os")
 
+        just_configured = False
         if profile not in profiles:
-            console.print(f"\n  Profile '{profile}' doesn't exist yet.\n")
-            console.print("  How should it authenticate?\n")
-            console.print("  [1] AWS SSO / IAM Identity Center [bold](recommended)[/bold] "
-                           "[dim]— short-lived, auto-refreshing, no keys stored[/dim]")
-            console.print("  [2] Static access key [dim]— IAM Console → Users → "
-                           "Security credentials → Create access key[/dim]")
-            console.print()
-            auth_choice = _ask("Choose", default="1")
-
-            if auth_choice == "2":
-                console.print(f"  [dim]Running: aws configure --profile {profile}[/dim]")
-                subprocess.run(["aws", "configure", "--profile", profile])
-            elif _confirm(f"  Run 'aws configure sso --profile {profile}' now?", default=True):
+            console.print(f"\n  Profile '{profile}' doesn't exist yet.")
+            if _confirm(f"  Run 'aws configure sso --profile {profile}' now?", default=True):
                 console.print(
                     "  [dim]This opens a browser to sign in via your organization's SSO. "
                     "If your org doesn't use IAM Identity Center yet, an admin sets that up "
                     "once in the AWS SSO console — after that everyone can use this.[/dim]"
                 )
                 subprocess.run(["aws", "configure", "sso", "--profile", profile])
+                just_configured = True
             else:
                 console.print(
-                    f"  {_SKIP} Skipped — run it yourself later: "
-                    f"aws configure sso --profile {profile}  (or 'aws configure' for static keys)"
+                    f"  {_SKIP} Skipped — run it yourself later: aws configure sso --profile {profile}"
                 )
                 self._record("AWS", False, "profile not configured")
                 return
 
-        region  = _ask("AWS region", default="ap-south-1")
-        cluster = _ask("EKS cluster name (leave blank to skip EKS)", default="")
+        if not just_configured:
+            console.print(f"  [dim]Running: aws sso login --profile {profile}[/dim]")
+            subprocess.run(["aws", "sso", "login", "--profile", profile])
 
-        with console.status("  Verifying AWS identity…"):
-            ok, detail = _test_aws(profile, region)
+        region  = _ask("AWS Region", default="us-east-1")
+        cluster = _ask("EKS Cluster Name", default="")
 
-        if not ok:
-            console.print(f"  {_FAIL} AWS auth failed: {detail}")
-            console.print(f"  [dim]Run: aws configure --profile {profile}[/dim]")
-            self._record("AWS", False, detail)
-        else:
-            _set_env("AWS_PROFILE", profile)
-            _set_env("AWS_DEFAULT_REGION", region)
-            console.print(f"  {_OK} AWS connected — {detail[:80]}")
-            self._record("AWS", True, detail[:60])
+        _set_env("AWS_AUTH_METHOD", "sso_profile")
+        _set_env("AWS_PROFILE", profile)
+        _set_env("AWS_REGION", region)
+        if cluster:
+            _set_env("EKS_CLUSTER_NAME", cluster)
+        _set_env("AWS_ACCESS_KEY_ID", "")
+        _set_env("AWS_SECRET_ACCESS_KEY", "")
 
-            if cluster:
-                _set_env("EKS_CLUSTER", cluster)
-                with console.status("  Updating kubeconfig…"):
-                    ok2, out2 = _run([
-                        "aws", "eks", "update-kubeconfig",
-                        "--name", cluster,
-                        "--region", region,
-                        "--profile", profile,
-                    ], timeout=30)
-                if ok2:
-                    console.print(f"  {_OK} kubeconfig updated for {cluster}")
-                    ok3, detail3 = _test_kubectl()
-                    icon = _OK if ok3 else _FAIL
-                    console.print(f"  {icon} kubectl: {detail3}")
-                    self._record("Kubernetes (EKS)", ok3, detail3)
-                else:
-                    console.print(f"  {_FAIL} kubeconfig update failed: {out2[:100]}")
-                    self._record("Kubernetes (EKS)", False, out2[:60])
+        self._verify_aws_setup("SSO Profile", region, cluster)
 
-    def _aws_keys(self) -> None:
+    # ── Shared verification for ALL three AWS auth methods ─────────────────
+
+    def _verify_aws_setup(self, method_label: str, region: str, cluster: str) -> None:
+        """
+        Runs the same 5 checks regardless of method. Relies on _set_env()
+        having already applied the relevant AWS_* vars to os.environ (it
+        mutates the live process env, not just the .env file), so every
+        subprocess call below — 'aws' CLI and kubectl alike — naturally
+        picks up whichever method was just configured.
+        """
         console.print()
-        console.print(
-            f"  {_WARN} [yellow]Access keys are less secure than named profiles.[/yellow]\n"
-            "  [dim]Prefer: aws configure --profile agentic-os[/dim]"
-        )
-        if not _confirm("  Continue with access keys?", default=False):
+        console.print(f"  [bold]Verifying {method_label} setup…[/bold]\n")
+
+        results: list[tuple[str, bool]] = []
+
+        # 1. AWS identity
+        ok1, out1 = _run(["aws", "sts", "get-caller-identity", "--output", "json"], timeout=20)
+        identity: dict = {}
+        if ok1:
+            try:
+                identity = json.loads(out1)
+            except Exception:
+                ok1 = False
+        if ok1:
+            console.print(f"  {_OK} AWS identity verified")
+            console.print(f"      Account: {identity.get('Account', '?')}")
+            console.print(f"      ARN:     {identity.get('Arn', '?')}")
+        else:
+            console.print(f"  {_FAIL} AWS identity check failed")
+            console.print(f"      {out1[:200]}")
+            if method_label == "IAM Role":
+                console.print(
+                    "      [dim]No role attached? EC2 Console → your instance → "
+                    "Actions → Security → Modify IAM role → attach a role with "
+                    "EKS/EC2/cost-explorer permissions.[/dim]"
+                )
+        results.append(("AWS identity verified", ok1))
+
+        if not ok1:
+            self._record("AWS", False, out1[:150])
             return
 
-        access_key = _ask("AWS Access Key ID", password=True)
-        secret_key = _ask("AWS Secret Access Key", password=True)
-        region     = _ask("Region", default="ap-south-1")
+        account_id = identity.get("Account", "?")
+        arn        = identity.get("Arn", "?")
 
-        _set_env("AWS_ACCESS_KEY_ID", access_key)
-        _set_env("AWS_SECRET_ACCESS_KEY", secret_key)
-        _set_env("AWS_DEFAULT_REGION", region)
+        if not cluster:
+            console.print(f"\n  {_SKIP} No EKS cluster name given — skipping cluster checks.")
+            self._record("AWS", True, f"{method_label}: identity ok, no cluster configured")
+            return
 
-        # Test immediately
-        ok, detail = _run(
-            ["aws", "sts", "get-caller-identity", "--output", "text"],
-            timeout=20,
-        )
-        icon = _OK if ok else _FAIL
-        console.print(f"  {icon} AWS: {detail[:100]}")
-        self._record("AWS", ok, detail[:60])
+        # 2. EKS access
+        ok2, out2 = _run([
+            "aws", "eks", "describe-cluster", "--name", cluster, "--region", region,
+            "--query", "cluster.{status:status,version:version,endpoint:endpoint}",
+            "--output", "json",
+        ], timeout=20)
+        console.print(f"  {_OK if ok2 else _FAIL} EKS cluster accessible" if ok2
+                       else f"  {_FAIL} EKS cluster check failed: {out2[:150]}")
+        results.append(("EKS cluster accessible", ok2))
 
-        if ok:
-            cluster = _ask("EKS cluster name (leave blank to skip)", default="")
-            if cluster:
-                with console.status("  Updating kubeconfig…"):
-                    ok2, out2 = _run([
-                        "aws", "eks", "update-kubeconfig",
-                        "--name", cluster, "--region", region,
-                    ], timeout=30)
-                if ok2:
-                    ok3, d3 = _test_kubectl()
-                    console.print(f"  {_OK if ok3 else _FAIL} kubectl: {d3}")
-                    self._record("Kubernetes (EKS)", ok3, d3)
-                else:
-                    console.print(f"  {_FAIL} kubeconfig: {out2[:80]}")
-                    self._record("Kubernetes (EKS)", False, out2[:60])
+        # 3. Kubeconfig update
+        with console.status("  Updating kubeconfig…"):
+            ok3, out3 = _run(["aws", "eks", "update-kubeconfig", "--name", cluster, "--region", region], timeout=30)
+        console.print(f"  {_OK if ok3 else _FAIL} Kubeconfig updated" if ok3
+                       else f"  {_FAIL} Kubeconfig update failed: {out3[:150]}")
+        results.append(("Kubeconfig updated", ok3))
+
+        # 4. kubectl connectivity
+        ok4, out4 = _run(["kubectl", "get", "nodes", "--no-headers"], timeout=15)
+        node_lines = [l for l in out4.splitlines() if l.strip()] if ok4 else []
+        console.print(f"  {_OK} kubectl connectivity confirmed — {len(node_lines)} node(s) ready" if ok4
+                       else f"  {_FAIL} kubectl connectivity failed: {out4[:150]}")
+        results.append(("kubectl connectivity confirmed", ok4))
+
+        # 5. K8s RBAC permissions
+        ok5, out5 = _run(["kubectl", "auth", "can-i", "get", "pods", "--all-namespaces"], timeout=15)
+        if ok5:
+            console.print(f"  {_OK} K8s RBAC permissions verified")
+        else:
+            console.print(f"  {_FAIL} K8s RBAC permissions denied")
+            console.print(
+                "      [dim]This identity isn't recognized by the cluster's RBAC "
+                "(aws-auth ConfigMap / EKS access entries). Run 'agent k8s scan' "
+                "for the exact remediation command.[/dim]"
+            )
+        results.append(("K8s RBAC permissions verified", ok5))
+
+        all_ok = all(ok for _, ok in results)
+
+        summary = [
+            f"  Method:    {method_label}",
+            f"  Account:   {account_id}",
+            f"  Identity:  {arn}",
+            f"  Region:    {region}",
+            f"  Cluster:   {cluster}",
+        ]
+        if ok4:
+            summary.append(f"  Nodes:     {len(node_lines)} ready")
+        summary.append("")
+        summary += [f"  {_OK if ok else _FAIL} {label}" for label, ok in results]
+
+        console.print()
+        console.print(Panel(
+            "\n".join(summary),
+            title="[bold]AWS CONFIGURATION COMPLETE[/bold]" if all_ok
+                  else "[bold]AWS CONFIGURATION — ISSUES FOUND[/bold]",
+            border_style="green" if all_ok else "yellow",
+            padding=(1, 2),
+        ))
+        console.print()
+
+        self._record("AWS", all_ok, f"{method_label}: {arn}")
 
     # ── 3. Gmail ─────────────────────────────────────────────────────────────
 
