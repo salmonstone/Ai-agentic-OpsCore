@@ -1,0 +1,117 @@
+════════════════════════════════════════════════════════════════════════════════════════
+                               ATLASOS EVAL ARCHITECTURE                                
+            How every AI skill gets tested — same runner, three entry points            
+════════════════════════════════════════════════════════════════════════════════════════
+
+ 1  ENTRY POINTS — three different front doors, one identical code path
+
+ ┌──────────────────────────┐ ┌────────────────────────────┐ ┌──────────────────────────┐
+ │           CLI            │ │            MCP             │ │   CI  (GitHub Actions)   │
+ ├──────────────────────────┤ ├────────────────────────────┤ ├──────────────────────────┤
+ │ agent eval k8s           │ │ tool call:                 │ │ on: pull_request         │
+ │ agent eval jenkins       │ │ eval_skill("k8s")          │ │ matrix: 17 eval suites   │
+ │ agent eval security ...  │ │ (same skill, MCP front door)│ │ pytest / uv run          │
+ └──────────────────────────┘ └────────────────────────────┘ └──────────────────────────┘
+
+                                           │                                            
+                                └──────────┬──────────┘                                 
+                                           │                                            
+                                           ▼                                            
+
+ 2  EVAL RUNNER  (evals/<skill>/runner.py)  — loads cases.jsonl, orchestrates everything
+
+  ┌──────────────────────────────────────────────────────────────────────────────────┐
+  │ cases.jsonl  →  [{job_name, mock_log, mock_history, expected_problem_type, ...}, ...]│
+  │                                                                                  │
+  │ ┌────────────────────────┐  ┌────────────────────────┐  ┌────────────────────────┐│
+  │ │     LAYER A: MOCK      │  │    LAYER B: PATTERN    │  │   LAYER C: AI SKILL    ││
+  │ ├────────────────────────┤  ├────────────────────────┤  ├────────────────────────┤│
+  │ │ mock_kubectl()         │  │ regex over log text    │  │ novel / unmatched      ││
+  │ │ mock_aws()             │  │ known signature?       │  │ → llm.chat(...)        ││
+  │ │ mock_jenkins()         │  │ → instant result       │  │ real Claude API call   ││
+  │ │ — fake infra, real     │  │ — ZERO Claude calls    │  │ — costs tokens,        ││
+  │ │    skill code runs     │  │   ZERO cost            │  │   takes seconds        ││
+  │ └────────────────────────┘  └────────────────────────┘  └────────────────────────┘│
+  │                                                                                  │
+  │ Layer B checked FIRST — Layer C is the fallback only when nothing matches        │
+  └──────────────────────────────────────────────────────────────────────────────────┘
+
+                                           │                                            
+                                           ▼                                            
+
+ 3  SCORING ENGINE  — quality match, not exact match
+
+  ┌──────────────────────────────────────────────────────────────────────────────────┐
+  │                            SCORING RUBRIC (per case)                             │
+  ├──────────────────────────────────────────────────────────────────────────────────┤
+  │ problem_type == expected enum value ......... 40 pts                             │
+  │ root_cause / fix text contains expected keyword  30 pts                          │
+  │ fix_command / fix_action is valid for the case ..  20 pts                        │
+  │ confidence level appropriate (high/med/low) ..... 10 pts                         │
+  │ ----------------------------------------------------------------------           │
+  │ TOTAL ............................................ 100 pts / case                │
+  └──────────────────────────────────────────────────────────────────────────────────┘
+
+                                           │                                            
+                                           ▼                                            
+
+ 4  ENUMS  — typed vocabulary PER SKILL, not one shared enum
+
+ ┌────────────────────────────┐ ┌────────────────────────────┐ ┌──────────────────────┐
+ │      K8s ProblemType       │ │    Jenkins ProblemType     │ │  Jenkins FixAction   │
+ ├────────────────────────────┤ ├────────────────────────────┤ ├──────────────────────┤
+ │ CrashLoopBackOff           │ │ FLAKY_TEST                 │ │ RETRIGGER_BUILD      │
+ │ OOMKilled                  │ │ AGENT_OFFLINE              │ │ RESTART_AGENT        │
+ │ Pending                    │ │ DISK_FULL                  │ │ CLEAR_WORKSPACE      │
+ │ ImagePullBackOff           │ │ CREDENTIAL_EXPIRED         │ │ CANCEL_AND_RETRIGGER │
+ │ CreateContainerConfigError │ │ BUILD_TIMEOUT              │ │ MANUAL_ONLY          │
+ │ Unknown                    │ │ ... (16 total)             │ │ NO_ACTION_NEEDED     │
+ └────────────────────────────┘ └────────────────────────────┘ └──────────────────────┘
+
+                                           │                                            
+                                           ▼                                            
+
+ 5  RESULTS & GATE  — per case, then rolled up
+
+  ┌──────────────────────────────────────────────────────────────────────────────────┐
+  │                                   RESULT PHASE                                   │
+  ├──────────────────────────────────────────────────────────────────────────────────┤
+  │ Per case  : score /100, PASS or FAIL, latency_ms, cost_usd                       │
+  │ Summary   : pass_rate %, avg_score, tokens in/out, total cost_usd                │
+  │ ----------------------------------------------------------------------           │
+  │ pass_rate >= 80%  (85% for Jenkins)  ......  GATE OPEN  → merge allowed          │
+  │ pass_rate <  threshold  ..................  GATE CLOSED → PR blocked             │
+  └──────────────────────────────────────────────────────────────────────────────────┘
+
+                                           │                                            
+                                           ▼                                            
+
+ 6  CI/CD INTEGRATION
+
+  ┌──────────────────────────────────────────────────────────────────────────────────┐
+  │                                PR → GATE → MERGE                                 │
+  ├──────────────────────────────────────────────────────────────────────────────────┤
+  │ PR opened  →  GitHub Actions  →  runs all 17 eval suites in parallel             │
+  │                                                                                  │
+  │   ALL 17 suites clear their threshold  →  status check PASSES  →  merge allowed  │
+  │   ANY suite falls below its threshold  →  status check FAILS   →  PR blocked     │
+  └──────────────────────────────────────────────────────────────────────────────────┘
+
+                                           │                                            
+                                           ▼                                            
+
+ 7  MEMORY FEEDBACK LOOP  — the system gets smarter without retraining
+
+  ┌──────────────────────────────────────────────────────────────────────────────────┐
+  │                       PAST FAILURES BECOME FUTURE CONTEXT                        │
+  ├──────────────────────────────────────────────────────────────────────────────────┤
+  │ Failed / diagnosed case  →  remember()  →  SQLite + vector store                 │
+  │         │                                                                        │
+  │         └──  next diagnose() call  →  retrieve_context(job_name)                 │
+  │                               └──  past incidents fed into the                   │
+  │                                    SAME prompt as new context                    │
+  └──────────────────────────────────────────────────────────────────────────────────┘
+
+└─────────────────  loops back into Layer C's prompt on the NEXT eval run  ──────────────┘
+
+════════════════════════════════════════════════════════════════════════════════════════
