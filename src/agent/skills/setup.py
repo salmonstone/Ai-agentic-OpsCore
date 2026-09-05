@@ -679,16 +679,25 @@ class SetupWizard:
         if profiles:
             console.print("  Found AWS profiles on this machine:")
             for i, p in enumerate(profiles, 1):
-                console.print(f"    [{i}] {p}")
-            console.print(f"    [n] Create a new profile")
+                console.print(f"    [{i}] use existing profile named '{p}'")
+            console.print(f"    [bold cyan]N[/bold cyan] create a brand-new profile")
             console.print()
-            pick = _ask("AWS profile name — pick a number, or 'n' for new", default="1")
-            if pick.isdigit() and 1 <= int(pick) <= len(profiles):
-                profile = profiles[int(pick) - 1]
-            elif pick.lower() == "n":
-                profile = _ask("New profile name", default="agentic-os")
-            else:
-                profile = pick  # they typed a name directly
+            while True:
+                pick = _ask(
+                    "Type a NUMBER to reuse a profile above, or the LETTER N to create a new one",
+                    default="1",
+                )
+                pick = pick.strip()
+                if pick.isdigit() and 1 <= int(pick) <= len(profiles):
+                    profile = profiles[int(pick) - 1]
+                    break
+                if pick.lower() in ("n", "new"):
+                    profile = _ask("Name for the new profile", default="agentic-os")
+                    break
+                console.print(
+                    f"  {_WARN} '{pick}' isn't one of the options above — "
+                    f"type a number (1-{len(profiles)}) or the letter N."
+                )
         else:
             console.print(f"  {_WARN} No AWS CLI profiles found on this machine.")
             profile = _ask("New profile name (from ~/.aws/config)", default="agentic-os")
@@ -1087,10 +1096,74 @@ class SetupWizard:
 
         self._record("GitHub Webhooks", True, f"{len(mappings)} mapping(s) saved")
 
-    # ── 6. Custom integrations ────────────────────────────────────────────────
+    # ── 6. Jenkins CI/CD ─────────────────────────────────────────────────────
+
+    def configure_jenkins(self) -> None:
+        _section("Step 6 — Jenkins CI/CD (optional)")
+        console.print(
+            "  Monitor Jenkins builds/agents/queue and auto-heal known-safe failures "
+            "(flaky tests, stuck builds, stuck queue items).\n"
+        )
+
+        if not _confirm("Configure Jenkins integration?", default=False):
+            console.print(f"  {_SKIP} Jenkins skipped")
+            return
+
+        url = _ask("Jenkins URL (e.g. https://jenkins.company.com)")
+        if not url:
+            console.print(f"  {_SKIP} Jenkins skipped — no URL provided")
+            return
+
+        user = _ask("Jenkins username")
+        console.print(
+            "  [dim]Need a token? Jenkins → click your username (top right) → "
+            "Configure → API Token → Add new Token.[/dim]"
+        )
+        token = _ask("Jenkins API token (NOT your password)", password=True)
+
+        if not user or not token:
+            console.print(f"  {_SKIP} Jenkins skipped — username and API token are both required")
+            return
+
+        _set_env("JENKINS_URL", url.rstrip("/"))
+        _set_env("JENKINS_USER", user)
+        _set_env("JENKINS_API_TOKEN", token)
+
+        console.print()
+        with console.status("  Testing Jenkins connection…"):
+            try:
+                from agent.integrations import jenkins as jk
+                info = jk.get_connection_info()
+                ok = info.connected
+                detail = (
+                    f"version {info.version}, {info.num_executors} executor(s), "
+                    f"{info.node_count} node(s)"
+                    if ok else info.error
+                )
+            except Exception as exc:
+                ok, detail = False, str(exc)[:150]
+
+        icon = _OK if ok else _FAIL
+        console.print(f"  {icon} Jenkins: {detail}")
+        self._record("Jenkins", ok, detail)
+
+        if not ok:
+            return
+
+        if _confirm(
+            "\n  Enable Jenkins auto-healing? (flaky tests and stuck builds get "
+            "auto-fixed without asking)", default=False,
+        ):
+            _set_env("JENKINS_AUTO_HEAL", "true")
+            console.print(f"  {_OK} Auto-healing enabled — see `agent jenkins watch --auto-fix`")
+        else:
+            _set_env("JENKINS_AUTO_HEAL", "false")
+            console.print(f"  {_SKIP} Auto-healing off — you'll review fixes with `agent jenkins heal`")
+
+    # ── 7. Custom integrations ────────────────────────────────────────────────
 
     def configure_custom(self) -> None:
-        _section("Step 6 — Custom Integrations")
+        _section("Step 7 — Custom Integrations")
 
         if not _confirm("Add any other API integrations? (GitHub, Jira, etc.)", default=False):
             console.print(f"  {_SKIP} No custom integrations")
@@ -1119,10 +1192,10 @@ class SetupWizard:
             self._record(name, True, "key saved")
             console.print()
 
-    # ── 7. Default settings ───────────────────────────────────────────────────
+    # ── 8. Default settings ───────────────────────────────────────────────────
 
     def configure_defaults(self) -> None:
-        _section("Step 7 — Default Settings")
+        _section("Step 8 — Default Settings")
 
         model = _ask(
             "Default AI model",
@@ -1212,6 +1285,7 @@ class SetupWizard:
             self.configure_gmail()
             self.configure_slack()
             self.configure_github_webhooks()
+            self.configure_jenkins()
             self.configure_custom()
             self.configure_defaults()
         except KeyboardInterrupt:

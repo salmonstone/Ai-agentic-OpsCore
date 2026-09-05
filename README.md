@@ -44,6 +44,7 @@ The `agent setup` wizard walks you through each integration:
 | **Voyage AI** | Semantic memory search (free, 200M tokens/month) | Recommended |
 | **AWS** | EC2, EKS, load balancers, security groups, EIPs | For AWS commands |
 | **Kubernetes** | Pod health, ingress, TLS, RBAC, storage, HPA | For K8s commands |
+| **Jenkins** | CI/CD monitoring and self-healing (flaky builds, offline agents) | For Jenkins commands |
 | **Gmail** | Read and triage your inbox with AI | For Gmail commands |
 | **Custom APIs** | GitHub, Slack, Jira, or any OpenAI-compatible endpoint | Optional |
 
@@ -72,6 +73,22 @@ EC2/EKS), Access Keys (local dev), and SSO Profile. `agent setup` walks you
 through picking one. See [deployment/local/README.md](deployment/local/README.md)
 for local setups and [deployment/hosted/README.md](deployment/hosted/README.md)
 for running on EC2/EKS with an IAM role.
+
+### Jenkins CI/CD
+
+```bash
+agent jenkins scan               # Jobs, agents, queue — AI diagnosis of every failure
+agent jenkins diagnose <job>      # Deep dive on one job's failure, offer to apply the fix
+agent jenkins heal                # Apply every safe, known fix (flaky tests, stuck builds)
+agent jenkins watch --auto-fix    # Autonomous monitoring loop — heals known-safe issues, alerts on the rest
+agent jenkins auth-status         # Verify the Jenkins connection
+agent jenkins patterns            # Weekly recurring-failure analysis across incident history
+```
+
+Known-safe patterns (flaky tests, stuck queue items, hung builds) are detected by
+fast regex matching — no AI call — and can be auto-fixed. Anything else (credential
+expiry, disk full, syntax errors, offline agents) always requires human approval.
+See [deployment/local/README.md](deployment/local/README.md) for setup.
 
 ### TLS / Ingress
 

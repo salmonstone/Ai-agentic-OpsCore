@@ -586,6 +586,43 @@ def api_slos() -> JSONResponse:
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
+# ── Jenkins ────────────────────────────────────────────────────────────────────
+@app.get("/api/jenkins")
+def api_jenkins() -> JSONResponse:
+    """
+    Lightweight, non-AI Jenkins snapshot for the dashboard panel — jobs/agents/
+    queue only (no Claude call), so this stays cheap on every poll. Deep AI
+    diagnosis and fixes go through the CLI (`agent jenkins diagnose` / `heal`)
+    rather than an unauthenticated dashboard button.
+    """
+    from agent.config import settings
+    if not settings.jenkins_url:
+        return JSONResponse({"configured": False})
+    try:
+        from agent.integrations import jenkins as jk
+        info = jk.get_connection_info()
+        if not info.connected:
+            return JSONResponse({"configured": True, "connected": False, "error": info.error})
+
+        jobs    = jk.get_all_jobs()
+        failing = [j for j in jobs if not j.is_folder and j.is_failing]
+        offline = jk.get_offline_nodes()
+        stuck   = jk.get_stuck_queue_items()
+        total   = sum(1 for j in jobs if not j.is_folder)
+        score   = max(0, 100 - 10 * len(failing) - 15 * len(offline) - 5 * len(stuck))
+
+        return JSONResponse({
+            "configured":    True,
+            "connected":     True,
+            "health_score":  score,
+            "total_jobs":    total,
+            "failing_jobs":  [{"name": j.name, "color": j.color} for j in failing],
+            "offline_nodes": [n.name for n in offline],
+            "stuck_queue":   len(stuck),
+        })
+    except Exception as exc:
+        return JSONResponse({"configured": True, "connected": False, "error": str(exc)}, status_code=500)
+
 # ── pending deploys ───────────────────────────────────────────────────────────
 @app.get("/api/pending-deploys")
 def api_pending_deploys() -> JSONResponse:

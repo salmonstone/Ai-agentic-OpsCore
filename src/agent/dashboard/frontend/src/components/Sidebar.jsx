@@ -5,6 +5,7 @@ const NAV_ITEMS = [
   { id: 'clusters',  label: 'Clusters',  icon: '☸' },
   { id: 'incidents', label: 'Incidents', icon: '⚡' },
   { id: 'slos',      label: 'SLOs',      icon: '◎' },
+  { id: 'jenkins',   label: 'Jenkins',   icon: '⚙' },
   { id: 'approvals', label: 'Approvals', icon: '✦' },
 ]
 
@@ -13,13 +14,13 @@ const ICON_MAP = {
   daemon: '⚙', incident: '⚡', slo: '◎', db: '◫', scale: '⤢',
   runbook: '▶', page: '⟳', monitor: '◉', tls: '🔒', dns: '◦',
   ingress: '→', network: '⟷', memory: '▦', gmail: '✉', domain: '◎',
-  eval: '✓', root: '●', dashboard: '⊞',
+  eval: '✓', root: '●', dashboard: '⊞', jenkins: '⚙',
 }
 
 const GROUP_COLOR = {
   k8s: '#60a5fa', cost: '#f59e0b', incident: '#ef4444', slo: '#22c55e',
   deploy: '#a78bfa', db: '#34d399', scale: '#f97316', runbook: '#e05020',
-  daemon: '#818cf8', aws: '#f59e0b', page: '#ef4444',
+  daemon: '#818cf8', aws: '#f59e0b', page: '#ef4444', jenkins: '#d33833',
 }
 
 export default function Sidebar({ commandGroups, activeSection, activeCmd, onSelectCmd, onNav }) {

@@ -29,6 +29,7 @@ from agent.core.models import (
     IngressScanReport,
 )
 from agent.integrations.ingress_collector import collect_all_ingress
+from agent.integrations.kubectl import apply_fix as _kubectl_apply_fix
 from agent.integrations.kubectl import run_kubectl
 from agent.memory.retrieval import remember, retrieve_context
 from agent.observability.logging import get_logger
@@ -402,7 +403,7 @@ For cloud clusters (EKS/GKE/AKS): check IAM/permissions, cloud LB limits, subnet
 
     def apply_fix(self, fix_command: str, resource: str, namespace: str) -> bool:
         log.info("ingress.apply_fix", command=fix_command)
-        result = run_kubectl(fix_command.replace("kubectl ", "").split())
+        result = _kubectl_apply_fix(fix_command)
         remember(
             content=f"Applied ingress fix for {resource}/{namespace}: `{fix_command}` — "
                     f"{'succeeded' if result.success else 'failed'}",

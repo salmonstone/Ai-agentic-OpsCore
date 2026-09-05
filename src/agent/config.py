@@ -79,6 +79,15 @@ class Settings(BaseSettings):
     opsgenie_api_key:       str = ""   # OpsGenie Alerts API key
     opsgenie_region:        str = "us" # "us" or "eu"
 
+    # Jenkins CI/CD monitoring + self-healing
+    jenkins_url:            str  = ""   # e.g. https://jenkins.company.com
+    jenkins_user:           str  = ""
+    jenkins_api_token:      str  = ""   # API token, never the account password
+    jenkins_verify_ssl:     bool = True
+    jenkins_timeout:        int  = 30
+    jenkins_auto_heal:      bool = False   # true = auto-fix safe, known patterns
+    jenkins_scan_interval:  int  = 5       # minutes between scans in `agent jenkins watch`
+
     def get_aws_session(self):
         """
         Build a boto3.Session for the configured aws_auth_method.
@@ -156,4 +165,11 @@ except Exception:
         pagerduty_routing_key="",
         opsgenie_api_key="",
         opsgenie_region="us",
+        jenkins_url="",
+        jenkins_user="",
+        jenkins_api_token="",
+        jenkins_verify_ssl=True,
+        jenkins_timeout=30,
+        jenkins_auto_heal=False,
+        jenkins_scan_interval=5,
     )

@@ -1048,3 +1048,134 @@ class TerraformReport(BaseModel):
     @property
     def high_count(self) -> int:
         return sum(1 for f in self.findings if f.severity == "high")
+
+
+# ---------------------------------------------------------------------------
+# Jenkins CI/CD domain
+# ---------------------------------------------------------------------------
+
+class JenkinsProblemType(str, Enum):
+    FLAKY_TEST             = "FLAKY_TEST"
+    BROKEN_DEPENDENCY      = "BROKEN_DEPENDENCY"
+    AGENT_OFFLINE          = "AGENT_OFFLINE"
+    DISK_FULL              = "DISK_FULL"
+    CREDENTIAL_EXPIRED     = "CREDENTIAL_EXPIRED"
+    BAD_JENKINSFILE_SYNTAX = "BAD_JENKINSFILE_SYNTAX"
+    MERGE_CONFLICT         = "MERGE_CONFLICT"
+    TEST_TIMEOUT           = "TEST_TIMEOUT"
+    BUILD_TIMEOUT          = "BUILD_TIMEOUT"
+    NETWORK_ERROR          = "NETWORK_ERROR"
+    DOCKER_ERROR           = "DOCKER_ERROR"
+    OUT_OF_MEMORY          = "OUT_OF_MEMORY"
+    PERMISSION_DENIED      = "PERMISSION_DENIED"
+    STUCK_IN_QUEUE         = "STUCK_IN_QUEUE"
+    INFRASTRUCTURE_ISSUE   = "INFRASTRUCTURE_ISSUE"
+    UNKNOWN                = "UNKNOWN"
+
+
+class JenkinsFixAction(str, Enum):
+    RETRIGGER_BUILD      = "RETRIGGER_BUILD"
+    RESTART_AGENT        = "RESTART_AGENT"
+    CLEAR_WORKSPACE      = "CLEAR_WORKSPACE"
+    CANCEL_AND_RETRIGGER = "CANCEL_AND_RETRIGGER"
+    TOGGLE_AGENT_OFFLINE = "TOGGLE_AGENT_OFFLINE"
+    MANUAL_ONLY          = "MANUAL_ONLY"
+    NO_ACTION_NEEDED     = "NO_ACTION_NEEDED"
+
+
+class JenkinsInfo(BaseModel):
+    version:      str  = ""
+    url:          str  = ""
+    num_executors: int = 0
+    node_count:   int  = 0
+    connected:    bool = False
+    error:        str  = ""
+
+
+class JenkinsJob(BaseModel):
+    name:                    str
+    url:                     str = ""
+    color:                   str = ""   # blue/red/yellow/grey/aborted/notbuilt/disabled
+    last_build_number:       int | None = None
+    last_build_status:       str | None = None
+    last_build_timestamp:    int | None = None
+    last_build_duration_ms:  int | None = None
+    is_folder:               bool = False
+
+    @property
+    def is_failing(self) -> bool:
+        return any(tok in self.color for tok in ("red", "yellow", "aborted"))
+
+
+class BuildInfo(BaseModel):
+    number:     int
+    status:     str = ""   # SUCCESS/FAILURE/UNSTABLE/ABORTED
+    timestamp:  int = 0
+    duration_ms: int = 0
+    causes:     list[str] = Field(default_factory=list)
+    changes:    list[str] = Field(default_factory=list)
+    parameters: dict = Field(default_factory=dict)
+    node:       str = ""
+    artifacts:  list[str] = Field(default_factory=list)
+
+
+class JenkinsNode(BaseModel):
+    name:           str
+    online:         bool = False
+    idle:           bool = False
+    offline_cause:  str | None = None
+    num_executors:  int  = 0
+    labels:         list[str] = Field(default_factory=list)
+    temp_offline:   bool = False
+
+
+class QueueItem(BaseModel):
+    id:            int
+    job_name:      str = ""
+    why:           str = ""
+    blocked:       bool = False
+    buildable:     bool = False
+    params:        dict = Field(default_factory=dict)
+    stuck_minutes: int  = 0
+
+
+class JenkinsDiagnosis(BaseModel):
+    job_name:      str = ""
+    build_number:  int = 0
+    problem_type:  JenkinsProblemType = JenkinsProblemType.UNKNOWN
+    root_cause:    str = ""
+    confidence:    str = "low"     # high/medium/low
+    fix_action:    JenkinsFixAction = JenkinsFixAction.MANUAL_ONLY
+    fix_params:    dict = Field(default_factory=dict)
+    explanation:   str = ""
+    prevention:    str = ""
+    auto_fixable:  bool = False
+    risk_level:    str = "medium"  # low/medium/high
+
+
+class JenkinsScanReport(BaseModel):
+    total_jobs:          int = 0
+    failing_jobs:        int = 0
+    unstable_jobs:       int = 0
+    offline_nodes:       int = 0
+    stuck_queue_items:   int = 0
+    diagnoses:           list[JenkinsDiagnosis] = Field(default_factory=list)
+    auto_fixable_count:  int = 0
+    manual_count:        int = 0
+    health_score:        int = 100
+    generated_at:        str = ""
+
+
+class JenkinsFixResult(BaseModel):
+    success:          bool = False
+    action_taken:     str  = ""
+    new_build_number: int | None = None
+    message:          str  = ""
+    verified:         bool = False
+
+
+class JenkinsPattern(BaseModel):
+    title:          str = ""
+    likely_cause:   str = ""
+    recommendation: str = ""
+    affected_jobs:  list[str] = Field(default_factory=list)

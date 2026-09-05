@@ -297,6 +297,12 @@ terraform_app = typer.Typer(
 )
 app.add_typer(terraform_app, name="terraform")
 
+jenkins_app = typer.Typer(
+    help="Jenkins CI/CD monitoring and self-healing — flaky builds, offline agents, stuck queues.",
+    no_args_is_help=True,
+)
+app.add_typer(jenkins_app, name="jenkins")
+
 console = Console()
 
 # ---------------------------------------------------------------------------
@@ -1715,6 +1721,67 @@ def eval_cost() -> None:
         console.print()
 
         if pct < 80:
+            raise typer.Exit(1)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Command: agent eval jenkins
+# ---------------------------------------------------------------------------
+
+@eval_app.command("jenkins")
+def eval_jenkins() -> None:
+    """Run the Jenkins skill eval suite (pattern detection + live Claude fallback)."""
+    try:
+        from evals.jenkins.runner import run_evals  # type: ignore[import]
+
+        console.print()
+        console.print(Rule("[bold]Jenkins Skill Eval Suite[/bold]"))
+        console.print()
+
+        with console.status("[bold green]Running 12 eval cases...", spinner="dots"):
+            data = run_evals()
+
+        results = data["results"]
+        totals  = data["totals"]
+
+        table = Table(
+            title=f"Jenkins Eval Results  [dim]({totals['cases']} cases)[/dim]",
+            show_lines=True, header_style="bold cyan", border_style="dim",
+        )
+        table.add_column("ID",     width=12)
+        table.add_column("Kind",   width=14)
+        table.add_column("Detail", max_width=50)
+        table.add_column("Pass",   justify="center", width=6)
+
+        for r in results:
+            status = "[bold green]PASS[/bold green]" if r["passed"] else "[bold red]FAIL[/bold red]"
+            table.add_row(r["id"], r["kind"], _escape(r["detail"]), status)
+
+        console.print(table)
+        console.print()
+
+        n      = totals["cases"]
+        passed = totals["passed"]
+        pct    = round(passed / n * 100) if n else 0
+        color  = "green" if pct >= 85 else "yellow" if pct >= 60 else "red"
+
+        console.print(f"  Pass rate : [{color}]{passed}/{n} ({pct}%)[/{color}]")
+        console.print()
+
+        _cost_footer({
+            "calls":          0,
+            "input_tokens":   totals["tokens_in"],
+            "output_tokens":  totals["tokens_out"],
+            "total_cost_usd": totals["cost_usd"],
+        })
+
+        if pct < 85:
             raise typer.Exit(1)
 
     except typer.Exit:
@@ -5200,6 +5267,476 @@ def ingress_heal() -> None:
             f"[dim]{skipped} skipped[/dim]  "
             f"[red]{failed} failed[/red]\n"
         )
+        _cost_footer(get_session_total())
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Helpers: jenkins
+# ---------------------------------------------------------------------------
+
+_JENKINS_PROBLEM_COLOR = {
+    "FLAKY_TEST":             "yellow",
+    "BROKEN_DEPENDENCY":      "red",
+    "AGENT_OFFLINE":          "bold red",
+    "DISK_FULL":              "bold red",
+    "CREDENTIAL_EXPIRED":     "bold red",
+    "BAD_JENKINSFILE_SYNTAX": "red",
+    "MERGE_CONFLICT":         "red",
+    "TEST_TIMEOUT":           "yellow",
+    "BUILD_TIMEOUT":          "yellow",
+    "NETWORK_ERROR":          "yellow",
+    "DOCKER_ERROR":           "red",
+    "OUT_OF_MEMORY":          "bold red",
+    "PERMISSION_DENIED":      "red",
+    "STUCK_IN_QUEUE":         "yellow",
+    "INFRASTRUCTURE_ISSUE":   "red",
+    "UNKNOWN":                "dim",
+}
+
+
+def _jenkins_fix_badge(d) -> str:
+    if d.fix_action.value == "MANUAL_ONLY":
+        return "[red]✗ MANUAL[/red]"
+    if d.auto_fixable:
+        return f"[green]✓ {d.fix_action.value}[/green]"
+    return f"[yellow]○ {d.fix_action.value}[/yellow]"
+
+
+def _print_jenkins_diagnosis(d) -> None:
+    prob_color = _JENKINS_PROBLEM_COLOR.get(d.problem_type.value, "white")
+    conf_color = _CONFIDENCE_COLOR.get(d.confidence.lower(), "white")
+    divider = "[dim]" + "-" * 58 + "[/dim]"
+    lines = [
+        f"[dim]Build      :[/dim] #{d.build_number}",
+        f"[dim]Problem    :[/dim] [{prob_color}]{_escape(d.problem_type.value)}[/{prob_color}]",
+        f"[dim]Confidence :[/dim] [bold {conf_color}]{d.confidence.upper()}[/bold {conf_color}]",
+        f"[dim]Fix Action :[/dim] {_escape(d.fix_action.value)}",
+        f"[dim]Risk       :[/dim] {d.risk_level.upper()}",
+        divider,
+        "[bold]ROOT CAUSE[/bold]",
+        _escape(d.root_cause),
+        divider,
+        "[bold]EXPLANATION[/bold]",
+        _escape(d.explanation),
+    ]
+    if d.prevention:
+        lines += [divider, "[bold]PREVENTION[/bold]", _escape(d.prevention)]
+    console.print(Panel(
+        "\n".join(lines),
+        title=f"[bold]JENKINS DIAGNOSIS:[/bold] [cyan]{_escape(d.job_name)}[/cyan]",
+        border_style="cyan",
+        padding=(1, 2),
+    ))
+
+
+# ---------------------------------------------------------------------------
+# Command: agent jenkins scan
+# ---------------------------------------------------------------------------
+
+@jenkins_app.command("scan")
+def jenkins_scan() -> None:
+    """Scan all Jenkins jobs, agents, and the build queue; show failures with AI diagnosis."""
+    try:
+        from agent.observability.costs import get_session_total
+        from agent.skills.jenkins import JenkinsSkill
+
+        console.print()
+        console.print(Rule("[bold cyan]Jenkins Health Scan[/bold cyan]"))
+        console.print()
+
+        with console.status("[bold cyan]Scanning Jenkins...[/bold cyan]", spinner="dots"):
+            report = JenkinsSkill().scan()
+
+        score = report.health_score
+        score_color = "green" if score >= 80 else "yellow" if score >= 50 else "red"
+        status_label = "Healthy" if score >= 80 else "Degraded" if score >= 50 else "Critical"
+
+        console.print(Panel(
+            f"[bold]Health Score:[/bold]  [{score_color}]{score}/100[/{score_color}]  {status_label}\n"
+            f"[bold]Jobs:[/bold]  {report.total_jobs} total   "
+            f"[red]{report.failing_jobs} failing[/red]   [yellow]{report.unstable_jobs} unstable[/yellow]\n"
+            f"[bold]Agents offline:[/bold]  {report.offline_nodes}\n"
+            f"[bold]Queue stuck:[/bold]  {report.stuck_queue_items}",
+            title="JENKINS HEALTH SCAN",
+            border_style=score_color,
+            padding=(1, 2),
+        ))
+        console.print()
+
+        if report.diagnoses:
+            table = Table(title="Failing Jobs", show_lines=True,
+                          header_style="bold cyan", border_style="dim")
+            table.add_column("Job", max_width=28, no_wrap=True)
+            table.add_column("Problem")
+            table.add_column("Conf.", justify="center", width=8)
+            table.add_column("Auto-fix")
+            for d in report.diagnoses:
+                prob_color = _JENKINS_PROBLEM_COLOR.get(d.problem_type.value, "white")
+                conf_color = _CONFIDENCE_COLOR.get(d.confidence.lower(), "white")
+                table.add_row(
+                    _escape(d.job_name),
+                    f"[{prob_color}]{_escape(d.problem_type.value)}[/{prob_color}]",
+                    f"[{conf_color}]{d.confidence}[/{conf_color}]",
+                    _jenkins_fix_badge(d),
+                )
+            console.print(table)
+            console.print()
+            console.print("  Run: [cyan]agent jenkins heal[/cyan]  (to fix auto-fixable issues)")
+            console.print("  Run: [cyan]agent jenkins diagnose <job>[/cyan]  (deep dive)\n")
+        else:
+            console.print(Panel("[bold green]All jobs passing![/bold green]", border_style="green"))
+            console.print()
+
+        _cost_footer(get_session_total())
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Command: agent jenkins diagnose JOB_NAME
+# ---------------------------------------------------------------------------
+
+@jenkins_app.command("diagnose")
+def jenkins_diagnose(
+    job_name: str = typer.Argument(..., help="Job name, e.g. backend-api/main"),
+    build: int | None = typer.Option(None, "--build", help="Build number (default: last build)."),
+) -> None:
+    """Deep-dive AI diagnosis of one Jenkins job's failure."""
+    try:
+        from agent.integrations import jenkins as jk
+        from agent.memory.retrieval import retrieve_context
+        from agent.observability.costs import get_session_total
+        from agent.skills.jenkins import JenkinsSkill
+
+        skill = JenkinsSkill()
+
+        build_number = build
+        if build_number is None:
+            jobs = {j.name: j for j in jk.get_all_jobs()}
+            job = jobs.get(job_name)
+            if not job or job.last_build_number is None:
+                _print_error(f"No build history found for '{job_name}'.")
+                raise typer.Exit(1)
+            build_number = job.last_build_number
+
+        console.print()
+        with console.status(
+            f"[bold cyan]Diagnosing {job_name} #{build_number}...[/bold cyan]", spinner="dots",
+        ):
+            build_info = jk.get_build_info(job_name, build_number)
+            log_text   = jk.get_console_log(job_name, build_number)
+            history    = jk.get_build_history(job_name, count=5)
+            past       = retrieve_context(f"jenkins {job_name} failure")
+            diagnosis  = skill.diagnose(job_name, build_info, log_text, history, past)
+
+        console.print()
+        _print_jenkins_diagnosis(diagnosis)
+        console.print()
+        _cost_footer(get_session_total())
+
+        if diagnosis.fix_action.value == "MANUAL_ONLY":
+            console.print("[dim]This issue requires manual intervention — no automated fix offered.[/dim]\n")
+            return
+
+        apply = typer.confirm(f"Apply fix ({diagnosis.fix_action.value})?", default=False)
+        if not apply:
+            console.print("[dim]Fix skipped.[/dim]\n")
+            return
+
+        with console.status("[bold yellow]Applying fix...", spinner="dots"):
+            fix_result = skill.apply_fix(diagnosis, confirmed=True)
+
+        if fix_result.success:
+            console.print(f"  [bold green]✓[/bold green] {fix_result.message}")
+        else:
+            console.print(f"  [bold red]✗[/bold red] {fix_result.message}")
+        console.print()
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Command: agent jenkins heal
+# ---------------------------------------------------------------------------
+
+@jenkins_app.command("heal")
+def jenkins_heal(
+    auto: bool = typer.Option(False, "--auto", help="Apply all auto-fixable issues without asking per item."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be done, without changing anything."),
+) -> None:
+    """Scan Jenkins and interactively apply every safe, known fix."""
+    try:
+        from agent.observability.costs import get_session_total
+        from agent.skills.jenkins import JenkinsSkill
+
+        console.print()
+        console.print(Rule("[bold cyan]Jenkins — Heal[/bold cyan]"))
+        console.print()
+
+        skill = JenkinsSkill()
+        with console.status("[bold cyan]Scanning...[/bold cyan]", spinner="dots"):
+            report = skill.scan()
+
+        if not report.diagnoses:
+            console.print(Panel("[bold green]All jobs passing! Nothing to fix.[/bold green]",
+                                border_style="green"))
+            console.print()
+            _cost_footer(get_session_total())
+            return
+
+        fixable = [d for d in report.diagnoses if d.auto_fixable]
+        manual  = [d for d in report.diagnoses if not d.auto_fixable]
+
+        console.print(
+            f"  Found [bold red]{len(report.diagnoses)}[/bold red] issue(s)  "
+            f"([green]{len(fixable)}[/green] auto-fixable, [yellow]{len(manual)}[/yellow] manual)\n"
+        )
+
+        fixed = skipped = failed = 0
+
+        for d in fixable:
+            prob_color = _JENKINS_PROBLEM_COLOR.get(d.problem_type.value, "white")
+            console.print(Rule(
+                f"[cyan]{_escape(d.job_name)}[/cyan]  "
+                f"[{prob_color}]{_escape(d.problem_type.value)}[/{prob_color}]"
+            ))
+            console.print(f"  Fix: {d.fix_action.value}   "
+                          f"Risk: {d.risk_level.upper()}   Confidence: {d.confidence.upper()}")
+
+            if dry_run:
+                console.print("  [dim]--dry-run: not applying.[/dim]\n")
+                skipped += 1
+                continue
+
+            if not auto and not typer.confirm("  Apply?", default=False):
+                console.print("  [dim]Skipped.[/dim]\n")
+                skipped += 1
+                continue
+
+            with console.status("[bold yellow]Applying...", spinner="dots"):
+                fix_result = skill.apply_fix(d, confirmed=True)
+
+            if not fix_result.success:
+                console.print(f"  [bold red]✗ {fix_result.message}[/bold red]\n")
+                failed += 1
+                continue
+
+            with console.status(
+                f"[bold cyan]Watching build #{fix_result.new_build_number}...[/bold cyan]", spinner="dots",
+            ):
+                verified = skill.verify_fix(d, fix_result)
+
+            if verified:
+                console.print(f"  [bold green]✓ {fix_result.message} Job recovered.[/bold green]\n")
+                fixed += 1
+            else:
+                console.print(
+                    "  [bold red]✗ Fix applied but job did not recover — "
+                    "escalated to manual.[/bold red]\n"
+                )
+                failed += 1
+
+        if manual:
+            console.print(Rule("[yellow]Manual-only issues[/yellow]"))
+            for d in manual:
+                console.print(
+                    f"  [yellow]○[/yellow] {_escape(d.job_name)} — "
+                    f"{d.problem_type.value}: {_escape(d.root_cause)}"
+                )
+            console.print()
+
+        console.print(Rule(style="dim"))
+        console.print(
+            f"\n  [bold]Heal Summary:[/bold]  "
+            f"[green]{fixed} fixed[/green]  [dim]{skipped} skipped[/dim]  "
+            f"[red]{failed} failed[/red]  [yellow]{len(manual)} manual[/yellow]\n"
+        )
+        _cost_footer(get_session_total())
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Command: agent jenkins watch
+# ---------------------------------------------------------------------------
+
+@jenkins_app.command("watch")
+def jenkins_watch(
+    interval: int  = typer.Option(5,     "--interval",       help="Minutes between scans.", show_default=True),
+    slack:    bool = typer.Option(True,  "--slack/--no-slack", help="Send alerts to Slack."),
+    auto_fix: bool = typer.Option(False, "--auto-fix",       help="Auto-fix safe, known issues without prompting."),
+) -> None:
+    """Autonomous continuous monitoring loop for Jenkins. Press Ctrl+C to stop."""
+    import datetime as _dt
+
+    from agent.integrations.slack import is_configured as slack_ok, test_connection
+    from agent.skills.jenkins import JenkinsSkill
+    from rich.live import Live
+
+    slack_live = slack and slack_ok()
+    log_lines: list[str] = []
+
+    def _log(msg: str) -> None:
+        ts = _dt.datetime.now().strftime("%H:%M:%S")
+        log_lines.append(f"{ts}  {msg}")
+        if len(log_lines) > 12:
+            log_lines.pop(0)
+
+    if slack_live:
+        console.print("[green]Slack: connected — alerts will be sent[/green]")
+        test_connection()
+    else:
+        console.print("[yellow]Slack: not configured (run without --slack or set SLACK_WEBHOOK_URL)[/yellow]")
+
+    console.print(
+        f"[dim]Jenkins monitor started — interval={interval}min, "
+        f"auto-fix={'ON' if auto_fix else 'OFF'}. Ctrl+C to stop.[/dim]\n"
+    )
+
+    skill = JenkinsSkill()
+
+    def _build_panel() -> Table:
+        tbl = Table(box=None, show_header=False, padding=(0, 1))
+        tbl.add_column(width=14, style="dim")
+        tbl.add_column()
+        for line in log_lines:
+            tbl.add_row("", line)
+        tbl.add_row("", "")
+        tbl.add_row("Interval:", f"{interval} min")
+        tbl.add_row("Auto-fix:", "[green]ON[/green]" if auto_fix else "[dim]off[/dim]")
+        tbl.add_row("Slack:", "[green]ON[/green]" if slack_live else "[dim]off[/dim]")
+        tbl.add_row("", "[dim]Ctrl+C to stop[/dim]")
+        return tbl
+
+    try:
+        with Live(console=console, refresh_per_second=0.5, auto_refresh=False) as live:
+            def _on_tick(msg: str) -> None:
+                _log(msg)
+                live.update(
+                    Panel(
+                        _build_panel(),
+                        title="[bold cyan]JENKINS AUTONOMOUS MONITOR — RUNNING[/bold cyan]",
+                        border_style="cyan",
+                        padding=(0, 1),
+                    ),
+                    refresh=True,
+                )
+            _on_tick("Monitor started")
+            skill.watch(interval_minutes=interval, auto_fix=auto_fix,
+                       use_slack=slack_live, on_tick=_on_tick)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Monitor stopped.[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Command: agent jenkins auth-status
+# ---------------------------------------------------------------------------
+
+@jenkins_app.command("auth-status")
+def jenkins_auth_status() -> None:
+    """Verify the Jenkins connection and show version/executor/agent info."""
+    try:
+        from agent.config import settings
+        from agent.integrations import jenkins as jk
+
+        console.print()
+        console.print(Rule("[bold cyan]Jenkins Connection Status[/bold cyan]"))
+        console.print()
+
+        info = jk.get_connection_info()
+
+        if info.connected:
+            nodes = jk.get_all_nodes()
+            online = sum(1 for n in nodes if n.online)
+            console.print(Panel(
+                f"[bold]URL:[/bold]        {_escape(settings.jenkins_url)}\n"
+                f"[bold]User:[/bold]       {_escape(settings.jenkins_user)}\n"
+                f"[bold]Auth:[/bold]       [green]✓ API Token (valid)[/green]\n"
+                f"[bold]Version:[/bold]    {_escape(info.version) or '(unknown)'}\n"
+                f"[bold]Executors:[/bold]  {info.num_executors}\n"
+                f"[bold]Agents:[/bold]     {online} online / {len(nodes)} total",
+                title="JENKINS CONNECTION STATUS",
+                border_style="green",
+                padding=(1, 2),
+            ))
+        else:
+            console.print(Panel(
+                f"[bold]URL:[/bold]   {_escape(settings.jenkins_url) or '(not configured)'}\n"
+                f"[bold]Auth:[/bold]  [red]✗ {_escape(info.error)}[/red]\n\n"
+                "Run [cyan]agent setup[/cyan] to configure Jenkins, or check JENKINS_URL / "
+                "JENKINS_USER / JENKINS_API_TOKEN in .env.",
+                title="JENKINS CONNECTION STATUS",
+                border_style="red",
+                padding=(1, 2),
+            ))
+            raise typer.Exit(1)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Command: agent jenkins patterns
+# ---------------------------------------------------------------------------
+
+@jenkins_app.command("patterns")
+def jenkins_patterns(
+    days: int = typer.Option(30, "--days", help="Look-back window in days.", show_default=True),
+) -> None:
+    """Weekly systemic pattern analysis across recent Jenkins incidents."""
+    try:
+        from agent.observability.costs import get_session_total
+        from agent.skills.jenkins import JenkinsSkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Jenkins — Recurring Patterns (last {days} days)[/bold cyan]"))
+        console.print()
+
+        with console.status("[bold cyan]Analyzing incident history...[/bold cyan]", spinner="dots"):
+            patterns = JenkinsSkill().detect_patterns(days=days)
+
+        if not patterns:
+            console.print(
+                "[dim]No recurring patterns found — either too few incidents, "
+                "or nothing systemic yet.[/dim]\n"
+            )
+        else:
+            for i, p in enumerate(patterns, 1):
+                body = (
+                    f"[bold]Likely cause:[/bold] {_escape(p.likely_cause)}\n"
+                    f"[bold]Recommendation:[/bold] {_escape(p.recommendation)}"
+                )
+                if p.affected_jobs:
+                    body += f"\n[dim]Affected: {_escape(', '.join(p.affected_jobs))}[/dim]"
+                console.print(Panel(
+                    body,
+                    title=f"Pattern {i}: {_escape(p.title)}",
+                    border_style="yellow",
+                    padding=(1, 2),
+                ))
+            console.print()
+
         _cost_footer(get_session_total())
 
     except typer.Exit:
@@ -10151,6 +10688,7 @@ def monitor_start(
     Run in a tmux/screen session for 24/7 monitoring.
     """
     import time as _time
+    from agent.config import settings
     from agent.integrations.slack import is_configured as slack_ok, send_alert_generic, test_connection
     from agent.integrations.alert_dedup import AlertDeduplicator, make_fingerprint
     from agent.skills.k8s import K8sSkill
@@ -10163,6 +10701,11 @@ def monitor_start(
     k8s_sk  = K8sSkill()
     res_sk  = ResourceMonitorSkill()
     sec_sk  = SecurityAuditSkill()
+
+    jenkins_sk = None
+    if settings.jenkins_url:
+        from agent.skills.jenkins import JenkinsSkill
+        jenkins_sk = JenkinsSkill()
 
     slack_live  = slack and slack_ok()
     log_lines: list[str] = []
@@ -10284,6 +10827,45 @@ def monitor_start(
                                 )
                     except Exception as exc:
                         _log(f"Security    ✗ error: {exc}")
+
+                # ── Jenkins check (only if JENKINS_URL is configured) ─────
+                if jenkins_sk is not None:
+                    try:
+                        jreport = jenkins_sk.scan()
+                        if not jreport.diagnoses:
+                            _log(f"Jenkins     ✓ all passing (health={jreport.health_score}/100)")
+                        else:
+                            _log(f"Jenkins     ⚠ {len(jreport.diagnoses)} failing "
+                                 f"(health={jreport.health_score}/100)")
+                            for d in jreport.diagnoses:
+                                if settings.jenkins_auto_heal and d.auto_fixable:
+                                    fix_result = jenkins_sk.apply_fix(d, confirmed=True)
+                                    verified = (
+                                        jenkins_sk.verify_fix(d, fix_result)
+                                        if fix_result.success else False
+                                    )
+                                    if verified:
+                                        _log(f"  AUTO-FIXED → {d.job_name}")
+                                        if slack_live:
+                                            _send(title=f"Jenkins auto-fixed: {d.job_name}",
+                                                  msg=d.root_cause, sev="info",
+                                                  pod=d.job_name, ns="", etype=d.problem_type.value)
+                                    else:
+                                        _log(f"  AUTO-FIX FAILED → {d.job_name}")
+                                        if slack_live:
+                                            _send(title=f"Jenkins auto-fix failed: {d.job_name}",
+                                                  msg=d.root_cause, sev="critical",
+                                                  pod=d.job_name, ns="", etype=d.problem_type.value)
+                                elif slack_live:
+                                    sent = _send(
+                                        title=f"Jenkins: {d.job_name}", msg=d.root_cause,
+                                        sev="critical" if not d.auto_fixable else "warning",
+                                        pod=d.job_name, ns="", etype=d.problem_type.value,
+                                    )
+                                    if sent:
+                                        _log(f"  ALERT → {d.job_name}")
+                    except Exception as exc:
+                        _log(f"Jenkins     ✗ error: {exc}")
 
                 live.update(
                     Panel(

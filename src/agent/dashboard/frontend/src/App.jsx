@@ -7,6 +7,7 @@ import CommandRunner from './components/CommandRunner'
 import PendingApprovals from './components/PendingApprovals'
 import IncidentsPanel from './components/IncidentsPanel'
 import SLOPanel from './components/SLOPanel'
+import JenkinsPanel from './components/JenkinsPanel'
 import ClustersPanel from './components/ClustersPanel'
 import AboutPanel from './components/AboutPanel'
 
@@ -108,6 +109,7 @@ export default function App() {
           {activeSection === 'clusters'  && <ClustersPanel />}
           {activeSection === 'incidents' && <IncidentsPanel />}
           {activeSection === 'slos'      && <SLOPanel />}
+          {activeSection === 'jenkins'   && <JenkinsPanel />}
           {activeSection === 'approvals' && <PendingApprovals />}
         </main>
 
