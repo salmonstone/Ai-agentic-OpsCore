@@ -1089,6 +1089,58 @@ def usage() -> None:
     console.print()
 
 
+@app.command("policy")
+def policy_list(
+    domain: str | None = typer.Option(None, "--domain", "-d",
+                                       help="Show only this domain, e.g. jenkins/security/cost."),
+) -> None:
+    """
+    Show the shared safety/policy engine's full rule table — every
+    (domain, category, fix_action) -> risk level this project will ever
+    auto-apply without asking a human, plus the command-content guard.
+    """
+    from agent.core.safety import POLICY, RiskLevel, _DANGEROUS_TOKENS
+
+    _RISK_COLOR = {
+        RiskLevel.SAFE: "dim", RiskLevel.LOW: "green", RiskLevel.MEDIUM: "yellow",
+        RiskLevel.HIGH: "bold orange1", RiskLevel.CRITICAL: "bold red",
+    }
+
+    console.print()
+    console.print(Rule("[bold cyan]Safety / Policy Engine[/bold cyan]"))
+    console.print()
+
+    domains = [domain] if domain else list(POLICY.keys())
+    for d in domains:
+        rules = POLICY.get(d)
+        if not rules:
+            console.print(f"[yellow]No policy entries for domain '{d}'.[/yellow]")
+            continue
+
+        tbl = Table(title=f"[bold]{d}[/bold]", show_lines=False,
+                    header_style="bold cyan", border_style="dim")
+        tbl.add_column("Category")
+        tbl.add_column("Fix Action")
+        tbl.add_column("Risk Level", justify="center")
+        tbl.add_column("Auto-applied?", justify="center")
+        for (category, fix_action), level in rules.items():
+            color = _RISK_COLOR.get(level, "white")
+            auto = "[green]yes[/green]" if level in (RiskLevel.SAFE, RiskLevel.LOW) else "[dim]no — asks first[/dim]"
+            tbl.add_row(category, fix_action, f"[{color}]{level.value.upper()}[/{color}]", auto)
+        console.print(tbl)
+        console.print()
+
+    console.print(Panel(
+        "Any (domain, category) pair NOT listed above defaults to "
+        "[bold red]CRITICAL[/bold red] — never auto-applied. This is a "
+        "default-deny allowlist, not a denylist.\n\n"
+        f"[bold]Command-content guard[/bold] (checked regardless of domain/confidence):\n"
+        f"  {', '.join(_DANGEROUS_TOKENS)}",
+        title="Design principle", border_style="dim", padding=(1, 2),
+    ))
+    console.print()
+
+
 # ---------------------------------------------------------------------------
 # Command: agent triage
 # ---------------------------------------------------------------------------

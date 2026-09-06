@@ -24,6 +24,7 @@ from agent.core.models import (
     CertInfo, ClusterOverview, IngressInfo, KubectlResult,
     NamespaceInfo, NodeInfo, PodInfo, ProblemType, TLSSecretInfo,
 )
+from agent.core.safety import command_is_dangerous
 from agent.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -1030,6 +1031,20 @@ def apply_fix(command: str) -> KubectlResult:
     Runs steps in order and stops at the first failure.
     """
     log.info("kubectl.apply_fix", command=command)
+
+    dangerous = command_is_dangerous(command)
+    if dangerous:
+        log.warning("kubectl.apply_fix.blocked", command=command, token=dangerous)
+        return KubectlResult(
+            command=[], output="",
+            error=(
+                f"Blocked by safety policy: command contains '{dangerous}', which is "
+                "never auto-executed regardless of which skill suggested it. "
+                "Run this manually if you're certain it's correct."
+            ),
+            success=False, duration_ms=0.0,
+        )
+
     steps = _split_fix_steps(command)
 
     outputs: list[str] = []

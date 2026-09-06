@@ -19,7 +19,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
-from agent.core import context, llm
+from agent.core import context, llm, safety
 from agent.core.models import (
     BuildInfo,
     JenkinsDiagnosis,
@@ -39,33 +39,17 @@ log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Auto-fix policy — the only combinations ever applied without a human
+# Auto-fix policy — routed through the shared safety engine (core/safety.py)
+# rather than a private whitelist, so this domain's rules are inspectable
+# via `agent policy list` alongside every other skill's.
 # ---------------------------------------------------------------------------
 
-_AUTO_FIX_RULES: set[tuple[JenkinsProblemType, JenkinsFixAction]] = {
-    (JenkinsProblemType.FLAKY_TEST, JenkinsFixAction.RETRIGGER_BUILD),
-    (JenkinsProblemType.STUCK_IN_QUEUE, JenkinsFixAction.CANCEL_AND_RETRIGGER),
-    (JenkinsProblemType.BUILD_TIMEOUT, JenkinsFixAction.CANCEL_AND_RETRIGGER),
-}
-
-# Never auto-fixed regardless of confidence/risk
-_NEVER_AUTO = {
-    JenkinsProblemType.CREDENTIAL_EXPIRED,
-    JenkinsProblemType.AGENT_OFFLINE,
-    JenkinsProblemType.DISK_FULL,
-    JenkinsProblemType.BAD_JENKINSFILE_SYNTAX,
-    JenkinsProblemType.UNKNOWN,
-}
-
-
 def _is_auto_fixable(diagnosis: JenkinsDiagnosis) -> bool:
-    if diagnosis.problem_type in _NEVER_AUTO:
-        return False
     if diagnosis.risk_level == "high":
-        return False
-    if diagnosis.confidence != "high":
-        return False
-    return (diagnosis.problem_type, diagnosis.fix_action) in _AUTO_FIX_RULES
+        return False  # Claude's own per-instance risk signal can still veto
+    return safety.is_auto_approved(
+        "jenkins", diagnosis.problem_type.value, diagnosis.fix_action.value, diagnosis.confidence,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +108,7 @@ def _detect_pattern(log_text: str, history: list[BuildInfo]) -> JenkinsDiagnosis
                 fix_action=fix_action,
                 explanation=f"Matched known failure signature for {problem_type.value}.",
                 prevention=_PREVENTION_HINTS.get(problem_type, ""),
-                auto_fixable=(problem_type, fix_action) in _AUTO_FIX_RULES,
+                auto_fixable=safety.is_auto_approved("jenkins", problem_type.value, fix_action.value, "high"),
                 risk_level="low" if fix_action != JenkinsFixAction.MANUAL_ONLY else "medium",
             )
 
