@@ -12256,6 +12256,88 @@ def incident_stats(
     console.print()
 
 
+@incident_app.command("correlate")
+def incident_correlate(
+    minutes: int = typer.Option(30, "--minutes", "-m",
+                                 help="Look-back window in minutes.", show_default=True),
+) -> None:
+    """
+    Correlate deploys, autonomous actions, and every skill's memory within a
+    time window into ONE incident with a causal timeline — instead of
+    treating each symptom as its own disconnected alert.
+    """
+    try:
+        from agent.observability.costs import get_session_total
+        from agent.skills.incident_correlation import IncidentCorrelationSkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Incident Correlation — last {minutes} min[/bold cyan]"))
+        console.print()
+
+        with console.status("[bold cyan]Gathering signals and correlating...[/bold cyan]", spinner="dots"):
+            result = IncidentCorrelationSkill().correlate(minutes)
+
+        counts = result.signal_counts
+        console.print(
+            f"  Signals: {counts.get('deploys',0)} deploy(s)  "
+            f"{counts.get('daemon_actions',0)} daemon action(s)  "
+            f"{counts.get('memory_entries',0)} memory entr(y/ies)  "
+            f"{counts.get('open_incidents',0)} already-open incident(s)\n"
+        )
+
+        if not result.has_signal:
+            console.print(Panel(result.summary, border_style="dim"))
+            console.print()
+            _cost_footer(get_session_total())
+            return
+
+        if not result.is_incident:
+            console.print(Panel(
+                f"[bold]No correlated incident[/bold]  [dim](confidence: {result.confidence})[/dim]\n\n"
+                f"{_escape(result.root_cause)}",
+                border_style="green" if result.confidence != "high" else "yellow",
+                title="Assessment", padding=(0, 2),
+            ))
+            console.print()
+            _cost_footer(get_session_total())
+            return
+
+        sev_color = {"critical": "bold red", "warning": "bold yellow", "info": "cyan"}.get(result.severity, "white")
+        body = (
+            f"[bold]{_escape(result.title)}[/bold]\n\n"
+            f"[dim]Confidence:[/dim] {result.confidence.upper()}   "
+            f"[dim]Severity:[/dim] [{sev_color}]{result.severity.upper()}[/{sev_color}]   "
+            f"[dim]Service:[/dim] {_escape(result.primary_service)}/{_escape(result.namespace)}\n\n"
+            f"[bold]Root cause:[/bold]\n  {_escape(result.root_cause)}\n"
+        )
+        if result.contributing_factors:
+            body += "\n[bold]Contributing factors:[/bold]\n" + "\n".join(
+                f"  - {_escape(f)}" for f in result.contributing_factors
+            )
+        console.print(Panel(body, border_style=sev_color.split()[-1], title="CORRELATED INCIDENT", padding=(1, 2)))
+
+        if result.timeline:
+            tbl = Table(title="Causal Timeline", show_lines=False, header_style="bold cyan", border_style="dim")
+            tbl.add_column("Event", no_wrap=True)
+            tbl.add_column("Detail")
+            for ev in result.timeline:
+                tbl.add_row(ev.event_type, _escape(ev.detail))
+            console.print(tbl)
+
+        console.print()
+        if result.incident_id:
+            console.print(f"  [green]Incident opened/updated:[/green] {result.incident_id}")
+            console.print(f"  [dim]agent incident show {result.incident_id}[/dim]")
+        console.print()
+        _cost_footer(get_session_total())
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Eval: daemon
 # ---------------------------------------------------------------------------

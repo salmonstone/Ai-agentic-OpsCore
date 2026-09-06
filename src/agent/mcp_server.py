@@ -488,5 +488,21 @@ async def project_status() -> dict:
     return await asyncio.to_thread(_run)
 
 
+@mcp.tool()
+async def incident_correlate(minutes: int = 30) -> dict:
+    """Correlate deploys, autonomous daemon actions, and every skill's memory
+    within a time window into ONE incident with a causal timeline, instead of
+    treating each symptom as its own disconnected alert. Only opens/updates a
+    real incident in incident_db when confidence is high or medium — a
+    low-confidence guess is returned but never recorded as noise.
+
+    minutes: how far back to look for correlated signals.
+    """
+    def _run():
+        from agent.skills.incident_correlation import IncidentCorrelationSkill
+        return IncidentCorrelationSkill().correlate(minutes).model_dump()
+    return await asyncio.to_thread(_run)
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

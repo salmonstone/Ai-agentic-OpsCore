@@ -636,6 +636,36 @@ class SecurityDriftReport(BaseModel):
     total_active:     int                    = 0        # total real findings right now
 
 
+class TimelineEvent(BaseModel):
+    """One entry in a correlated incident's causal chain."""
+    timestamp:  str = ""
+    source:     str = ""   # "deploy" | "daemon_action" | "memory:<skill-source>" | "incident"
+    event_type: str = ""   # e.g. "deploy", "error_rate_spike", "pod_restart", "latency_increase"
+    detail:     str = ""
+
+
+class CorrelatedIncident(BaseModel):
+    """
+    Result of scanning every existing signal source (deploys, daemon actions,
+    memory/RAG across every skill, open incidents) within a time window and
+    asking Claude whether they represent one causally-linked incident.
+    """
+    window_minutes:       int                    = 30
+    has_signal:           bool                   = False   # False = nothing at all in the window
+    is_incident:          bool                   = False   # True = Claude judged this a real, linked incident
+    confidence:           str                    = "low"   # high / medium / low
+    title:                str                    = ""
+    root_cause:           str                    = ""
+    contributing_factors: list[str]              = Field(default_factory=list)
+    primary_service:      str                    = ""
+    namespace:            str                    = ""
+    severity:             str                    = "warning"
+    timeline:             list[TimelineEvent]    = Field(default_factory=list)
+    incident_id:          str | None             = None    # set only if an incident was opened/reused
+    signal_counts:        dict                   = Field(default_factory=dict)
+    summary:              str                    = ""
+
+
 # ---------------------------------------------------------------------------
 # Multi-cluster management
 # ---------------------------------------------------------------------------
