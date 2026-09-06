@@ -625,6 +625,17 @@ class SecurityReport(BaseModel):
     claude_summary:  str                        = ""
 
 
+class SecurityDriftReport(BaseModel):
+    """What changed since the last security audit of this cluster."""
+    cluster_name:     str                    = ""
+    scan_time:        str                    = ""
+    has_baseline:     bool                   = False   # False = no prior scan to compare against
+    new_findings:     list[SecurityFinding]  = Field(default_factory=list)
+    resolved_count:   int                    = 0        # findings that existed before, gone now
+    unchanged_count:  int                    = 0        # findings present in both scans
+    total_active:     int                    = 0        # total real findings right now
+
+
 # ---------------------------------------------------------------------------
 # Multi-cluster management
 # ---------------------------------------------------------------------------

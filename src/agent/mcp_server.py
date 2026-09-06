@@ -196,6 +196,21 @@ async def security_audit(namespace: str = "all") -> dict:
 
 
 @mcp.tool()
+async def security_drift(namespace: str = "all") -> dict:
+    """Security audit that only reports what's NEW since the last scan of
+    this cluster (new findings, resolved count, unchanged count) — instead
+    of repeating every finding every time. Read-only. First call on a
+    cluster has no baseline yet; every call becomes the baseline for next.
+
+    namespace: Kubernetes namespace to audit, or "all" for every namespace.
+    """
+    def _run():
+        from agent.skills.security import SecurityAuditSkill
+        return SecurityAuditSkill().detect_drift(namespace).model_dump()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def cost_analyze(days: int = 30) -> dict:
     """Full AWS cost optimization analysis — spend by service, waste detected,
     savings opportunities, spend anomalies, over a trailing window. Read-only.

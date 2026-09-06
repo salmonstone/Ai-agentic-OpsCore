@@ -1957,6 +1957,44 @@ _SENSITIVE_ENV_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Shapes of values that look like a REAL, live credential rather than a
+# placeholder. Used only to classify severity — the matched value itself is
+# never returned, logged, or stored anywhere; only the pattern name is.
+_SECRET_VALUE_PATTERNS = [
+    ("aws_access_key", re.compile(r"^AKIA[0-9A-Z]{16}$")),
+    ("slack_webhook",  re.compile(r"^https://hooks\.slack\.com/services/")),
+    ("private_key",    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("jwt",            re.compile(r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")),
+]
+_PLACEHOLDER_VALUES = {
+    "", "changeme", "change-me", "test", "test123", "placeholder", "xxx",
+    "todo", "none", "null", "password", "secret", "example", "your-key-here",
+    "<value>", "changethis",
+}
+
+
+def _classify_secret_value(value: str) -> tuple[str, str]:
+    """
+    Classify a hardcoded env var value's *shape* — never returns the value
+    itself. Returns (pattern_type, confidence):
+      confidence "high"   — matches a known, unambiguous credential format
+      confidence "medium" — long, mixed-character string; looks real but unverified
+      confidence "low"    — matches a common placeholder/test value
+    """
+    if value.strip().lower() in _PLACEHOLDER_VALUES:
+        return "placeholder", "low"
+    for name, pattern in _SECRET_VALUE_PATTERNS:
+        if pattern.search(value):
+            return name, "high"
+    if (
+        len(value) >= 20
+        and re.search(r"[A-Z]", value)
+        and re.search(r"[a-z]", value)
+        and re.search(r"[0-9]", value)
+    ):
+        return "generic_high_entropy", "medium"
+    return "unclassified", "low"
+
 
 def _get_pods_json_all(namespace: str = "all") -> list[dict]:
     """Fetch full pod specs as JSON — shared by all security checks."""
@@ -2001,7 +2039,14 @@ def get_privileged_pods(namespace: str = "all") -> list[dict]:
 
 
 def get_secrets_in_env(namespace: str = "all") -> list[dict]:
-    """Find pods with sensitive values hardcoded as plain env vars (not secretRef)."""
+    """
+    Find pods with sensitive values hardcoded as plain env vars (not secretRef).
+
+    Each finding includes pattern_type/confidence classifying the value's
+    *shape* (real-looking credential vs. an obvious placeholder) — the raw
+    value itself is read only transiently to classify it and is never
+    included in the returned dict, logged, or stored anywhere.
+    """
     findings: list[dict] = []
     for pod in _get_pods_json_all(namespace):
         pod_name = pod["metadata"]["name"]
@@ -2010,9 +2055,11 @@ def get_secrets_in_env(namespace: str = "all") -> list[dict]:
             for env in ctr.get("env", []):
                 name = env.get("name", "")
                 if _SENSITIVE_ENV_RE.search(name) and "value" in env and "valueFrom" not in env:
+                    pattern_type, confidence = _classify_secret_value(str(env.get("value", "")))
                     findings.append({
                         "pod": pod_name, "namespace": pod_ns,
                         "container": ctr["name"], "env_var": name,
+                        "pattern_type": pattern_type, "confidence": confidence,
                     })
     log.info("security.secrets_in_env", count=len(findings))
     return findings

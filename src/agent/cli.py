@@ -7993,6 +7993,70 @@ def k8s_security(
         raise typer.Exit(1)
 
 
+@k8s_app.command("security-drift")
+def k8s_security_drift(
+    namespace: str = typer.Option("all", "--namespace", "-n", show_default=True),
+) -> None:
+    """
+    Security audit that only shows what's NEW since the last scan of this
+    cluster — instead of repeating every finding every time.
+    """
+    try:
+        from agent.skills.security import SecurityAuditSkill
+
+        console.print()
+        with console.status("[bold cyan]Running security audit + drift comparison...", spinner="dots"):
+            drift = SecurityAuditSkill().detect_drift(namespace)
+
+        if not drift.has_baseline:
+            console.print(Panel(
+                f"[dim]No prior scan of this cluster to compare against — this becomes "
+                f"the baseline for next time.[/dim]\n\n"
+                f"[bold]{drift.total_active}[/bold] active finding(s) right now.",
+                title="[bold]SECURITY DRIFT — first scan[/bold]",
+                border_style="cyan", padding=(0, 2),
+            ))
+        elif not drift.new_findings and not drift.resolved_count:
+            console.print(Panel(
+                f"[bold green]No change since the last scan.[/bold green]\n"
+                f"[dim]{drift.unchanged_count} finding(s) still active, unchanged.[/dim]",
+                title="[bold]SECURITY DRIFT[/bold]",
+                border_style="green", padding=(0, 2),
+            ))
+        else:
+            lines = [
+                f"[bold]New:[/bold]       [bold red]{len(drift.new_findings)}[/bold red]",
+                f"[bold]Resolved:[/bold]  [bold green]{drift.resolved_count}[/bold green]  (fixed, or no longer detected)",
+                f"[bold]Unchanged:[/bold] [dim]{drift.unchanged_count}[/dim]",
+            ]
+            console.print(Panel(
+                "\n".join(lines),
+                title=f"[bold]SECURITY DRIFT — {_escape(drift.cluster_name)}[/bold]",
+                border_style="yellow" if drift.new_findings else "green",
+                padding=(0, 2),
+            ))
+
+            if drift.new_findings:
+                console.print()
+                tbl = Table(title="NEW FINDINGS (since last scan)", show_lines=True,
+                            header_style="bold red", border_style="red")
+                tbl.add_column("ID")
+                tbl.add_column("Severity")
+                tbl.add_column("Finding")
+                tbl.add_column("Resource")
+                for f in drift.new_findings:
+                    tbl.add_row(f.id, f.severity.upper(), _escape(f.title), f"{f.namespace}/{_escape(f.affected_resource)}")
+                console.print(tbl)
+
+        console.print()
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Multi-cluster commands
 # ---------------------------------------------------------------------------

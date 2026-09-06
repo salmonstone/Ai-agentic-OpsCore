@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from agent.core import context, llm
 from agent.core.async_utils import run_sync
-from agent.core.models import SecurityFinding, SecurityReport
+from agent.core.models import SecurityDriftReport, SecurityFinding, SecurityReport
 from agent.integrations.kubectl import (
     get_current_context,
     get_deployment_for_pod,
@@ -35,7 +35,7 @@ from agent.integrations.kubectl import (
     get_secrets_in_env,
     run_kubectl,
 )
-from agent.memory.retrieval import remember
+from agent.memory.retrieval import get_memories_by_source, remember
 from agent.observability.logging import get_logger
 from agent.skills._fix_runner import apply_shell_fix
 from agent.skills.base import BaseSkill
@@ -163,7 +163,13 @@ class SecurityAuditSkill(BaseSkill):
         }
 
         raw: dict[str, list] = {}
-        with ThreadPoolExecutor(max_workers=6) as pool:
+        # max_workers=2, not 6: each kubectl call on this cluster needs its own
+        # AWS EKS credential round-trip (~1.5-4s sequentially); running all 6
+        # checks fully concurrently was observed to overwhelm that under real
+        # load, causing several to silently hit kubectl's 8s timeout and
+        # return empty results — invisible before, but a real correctness
+        # problem for drift detection, which depends on run-to-run consistency.
+        with ThreadPoolExecutor(max_workers=2) as pool:
             futures = {pool.submit(fn): key for key, fn in checks.items()}
             for future in as_completed(futures):
                 key = futures[future]
@@ -240,16 +246,24 @@ class SecurityAuditSkill(BaseSkill):
                     fix_command=None,
                 ))
             else:
+                # Severity reflects whether the value LOOKS like a real, live
+                # credential (matched a known format, or long/mixed-character)
+                # vs. an obvious placeholder — never based on the value itself
+                # being exposed, only its classified shape.
+                confidence = item.get("confidence", "low")
+                pattern_type = item.get("pattern_type", "unclassified")
+                sev = {"high": "critical", "medium": "high", "low": "low"}.get(confidence, "high")
                 _add(SecurityFinding(
-                    id="", severity="high", category="secret",
+                    id="", severity=sev, category="secret",
                     title=f"Secret in plain env var: {item['env_var']}",
                     description=(
                         f"Pod '{item['pod']}' has sensitive env var '{item['env_var']}' "
-                        f"as a hardcoded plain value, not a SecretKeyRef."
+                        f"as a hardcoded plain value, not a SecretKeyRef. "
+                        f"Value shape: {pattern_type} (confidence: {confidence})."
                     ),
                     affected_resource=item["pod"],
                     namespace=item["namespace"],
-                    evidence=f"env var name: {item['env_var']} (value hidden)",
+                    evidence=f"env var name: {item['env_var']} (value hidden, shape: {pattern_type})",
                     recommendation="Replace with a Kubernetes Secret and use secretKeyRef.",
                     fix_command=(
                         f"kubectl create secret generic app-secrets "
@@ -484,6 +498,69 @@ class SecurityAuditSkill(BaseSkill):
                  total=len(findings), system_components=counters["system_component"],
                  **{k: v for k, v in counters.items() if k != "system_component"})
         return report
+
+    # ------------------------------------------------------------------
+    # Drift detection — what's new since the last audit of this cluster
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fingerprint(f: SecurityFinding) -> str:
+        """Stable identity for a finding across runs — NOT f.id, which is
+        just a positional C1/C2/... label reassigned fresh every scan."""
+        return f"{f.category}|{f.namespace}|{f.affected_resource}|{f.title}"
+
+    def detect_drift(self, namespace: str = "all") -> SecurityDriftReport:
+        """
+        Run a fresh audit and compare it against the most recent past audit
+        of this same cluster — highlighting what's NEW since then, rather
+        than repeating every finding every time. Every real run_audit() call
+        also updates the baseline this compares against for next time.
+        """
+        current_report = self.run_audit(namespace)
+        cluster = current_report.cluster_name
+
+        current_real = [
+            f for f in current_report.findings
+            if f.category != "system_component" and f.severity != "info"
+        ]
+        current_by_fp = {self._fingerprint(f): f for f in current_real}
+
+        past_snapshots = [
+            m for m in get_memories_by_source("security-drift-snapshot")
+            if m.metadata.get("cluster") == cluster
+        ]
+        has_baseline = bool(past_snapshots)
+        # "__none__" is a sentinel for "zero active findings that run" — ChromaDB's
+        # metadata upsert rejects an empty list outright (no way to infer an
+        # element type), so an empty snapshot is never stored as [].
+        stored_fps = past_snapshots[0].metadata.get("fingerprints", []) if has_baseline else []
+        prior_fps = {fp for fp in stored_fps if fp != "__none__"}
+
+        new_fps = set(current_by_fp) - prior_fps
+        resolved_count = len(prior_fps - set(current_by_fp))
+        new_findings = [current_by_fp[fp] for fp in new_fps]
+
+        remember(
+            content=(
+                f"Security drift snapshot for {cluster}: {len(current_by_fp)} active "
+                f"finding(s), {len(new_findings)} new since last scan, {resolved_count} resolved."
+            ),
+            source="security-drift-snapshot",
+            metadata={"cluster": cluster, "fingerprints": list(current_by_fp) or ["__none__"]},
+        )
+
+        log.info("security.drift_done", cluster=cluster, has_baseline=has_baseline,
+                 new=len(new_findings), resolved=resolved_count, unchanged=len(current_by_fp) - len(new_findings))
+
+        return SecurityDriftReport(
+            cluster_name=cluster,
+            scan_time=current_report.scan_time,
+            has_baseline=has_baseline,
+            new_findings=new_findings,
+            resolved_count=resolved_count,
+            unchanged_count=len(current_by_fp) - len(new_findings),
+            total_active=len(current_by_fp),
+        )
 
     # ------------------------------------------------------------------
     # Intelligence
