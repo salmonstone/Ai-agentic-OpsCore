@@ -52,8 +52,13 @@ async def jenkins_list_jobs(folder: str | None = None) -> list[dict]:
     folder: list only jobs inside this folder, or omit for everything.
     """
     def _run():
-        from agent.skills.jenkins import JenkinsSkill
-        return [j.model_dump() for j in JenkinsSkill().list_jobs(folder)]
+        # Calls integrations/jenkins.py directly, NOT JenkinsSkill — listing
+        # jobs needs no AI/memory, and importing the skill class drags in
+        # chromadb/embeddings (~4.2s cold) for zero benefit here (~0.9s
+        # importing the raw client directly). Same fix applied to the CLI's
+        # `agent jenkins jobs` command.
+        from agent.integrations import jenkins as jk
+        return [j.model_dump() for j in jk.get_all_jobs(folder)]
     return await asyncio.to_thread(_run)
 
 

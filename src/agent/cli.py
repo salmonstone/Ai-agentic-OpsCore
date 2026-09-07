@@ -5465,11 +5465,14 @@ def jenkins_jobs(
     """List every Jenkins job, regardless of pass/fail status — unlike
     `scan`, which only shows failing ones."""
     try:
-        from agent.skills.jenkins import JenkinsSkill
+        # Calls integrations/jenkins.py directly, not JenkinsSkill — this
+        # needs no AI/memory, and importing the skill class costs ~4.2s
+        # (pulls in chromadb/embeddings) vs ~0.9s for the raw client alone.
+        from agent.integrations import jenkins as jk
 
         console.print()
         with console.status("[bold cyan]Fetching jobs...[/bold cyan]", spinner="dots"):
-            jobs = JenkinsSkill().list_jobs(folder)
+            jobs = jk.get_all_jobs(folder)
 
         if not jobs:
             console.print("[dim]No jobs found on this Jenkins instance.[/dim]\n")
