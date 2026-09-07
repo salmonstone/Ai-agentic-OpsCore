@@ -5516,15 +5516,36 @@ def jenkins_trigger(
 ) -> None:
     """Directly trigger a build for a job — no diagnosis, just runs it."""
     try:
-        from agent.skills.jenkins import JenkinsSkill
+        # Direct integration call, not JenkinsSkill — same reasoning as
+        # `agent jenkins jobs`: this needs no AI/memory, and importing the
+        # skill class costs ~4s (chromadb/embeddings) for zero benefit here.
+        from agent.core.safety import name_suggests_destructive
+        from agent.integrations import jenkins as jk
 
-        if not yes and not typer.confirm(f"Trigger a new build for '{job_name}'?", default=False):
+        destructive_token = name_suggests_destructive(job_name)
+        if destructive_token:
+            console.print(Panel(
+                f"[bold red]'{job_name}' looks like a destructive pipeline[/bold red] "
+                f"(matched: '{destructive_token}').\n"
+                "Triggering it requires typing the exact job name — [bold]--yes does not "
+                "skip this[/bold], even if you already confirmed once.",
+                border_style="red", title="⚠ Destructive name detected",
+            ))
+            typed = typer.prompt("Type the exact job name to confirm")
+            if typed != job_name:
+                console.print("[dim]Name didn't match — cancelled.[/dim]\n")
+                return
+        elif not yes and not typer.confirm(f"Trigger a new build for '{job_name}'?", default=False):
             console.print("[dim]Cancelled.[/dim]\n")
             return
 
+        jobs = {j.name: j for j in jk.get_all_jobs()}
+        if job_name not in jobs:
+            raise ValueError(f"No such Jenkins job: '{job_name}'.")
+
         console.print()
         with console.status(f"[bold cyan]Triggering {job_name}...[/bold cyan]", spinner="dots"):
-            queue_id = JenkinsSkill().trigger_build(job_name)
+            queue_id = jk.retrigger_build(job_name)
 
         if queue_id >= 0:
             console.print(f"  [bold green]✓ Queued.[/bold green]  Queue item id: {queue_id}")

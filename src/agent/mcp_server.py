@@ -63,22 +63,50 @@ async def jenkins_list_jobs(folder: str | None = None) -> list[dict]:
 
 
 @mcp.tool()
-async def jenkins_trigger_build(job_name: str, confirm: bool = False) -> dict:
+async def jenkins_trigger_build(job_name: str, confirm: bool = False,
+                                 confirm_destructive_name: bool = False) -> dict:
     """Directly trigger a build for a named Jenkins job — no diagnosis, just
     runs it. This is a deliberate action the caller explicitly asked for by
     naming the job, not an autonomous fix, so it isn't gated by the
     problem/confidence-based safety policy the way jenkins_apply_fix is —
     but it still requires confirm=True before anything actually runs.
 
+    If the job NAME itself suggests destructive intent (contains "destroy",
+    "teardown", "nuke", "purge", "wipe", "decommission"), confirm=True is
+    NOT sufficient on its own — confirm_destructive_name must ALSO be
+    explicitly True. This is deliberate: a single "yes, trigger it" from a
+    natural-language conversation must never be enough to run something
+    named like this. Surface the destructive-name warning to the human and
+    get a distinct, explicit second acknowledgment before ever setting
+    confirm_destructive_name=True.
+
     job_name: exact Jenkins job name, e.g. "backend-api/main".
     confirm: must be explicitly True, or nothing is triggered.
+    confirm_destructive_name: required IN ADDITION to confirm when the job
+        name matches a destructive-sounding pattern.
     """
     def _run():
-        from agent.skills.jenkins import JenkinsSkill
+        from agent.core.safety import name_suggests_destructive
+        from agent.integrations import jenkins as jk
 
+        token = name_suggests_destructive(job_name)
+        if token and not confirm_destructive_name:
+            return {
+                "triggered": False,
+                "message": (
+                    f"'{job_name}' looks destructive (matched '{token}'). confirm=True alone "
+                    "is not enough for a job whose name suggests destructive intent — "
+                    "confirm_destructive_name=True is also required. Get an explicit, distinct "
+                    "acknowledgment from the human before setting it, not just their original 'yes'."
+                ),
+            }
         if not confirm:
             return {"triggered": False, "message": "Set confirm=True to actually trigger this build."}
-        queue_id = JenkinsSkill().trigger_build(job_name)
+
+        jobs = {j.name: j for j in jk.get_all_jobs()}
+        if job_name not in jobs:
+            raise ValueError(f"No such Jenkins job: '{job_name}'.")
+        queue_id = jk.retrigger_build(job_name)
         return {"triggered": True, "queue_id": queue_id}
     return await asyncio.to_thread(_run)
 

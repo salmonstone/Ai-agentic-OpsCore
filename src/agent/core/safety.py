@@ -118,6 +118,28 @@ def is_auto_approved(domain: str, category: str, fix_action: str = "*", confiden
     return assess(domain, category, fix_action, confidence) in (RiskLevel.SAFE, RiskLevel.LOW)
 
 
+# A resource/job NAME suggesting destructive intent — independent of what
+# its actual steps do. A job literally called "destroy pipeline" deserves
+# extra scrutiny before triggering, and critically: an ordinary "yes, do it"
+# confirmation is NOT enough for this — it must require a SEPARATE, explicit
+# acknowledgment of the destructive name, so a single confirm=True (which a
+# natural-language "yes trigger it" satisfies) can never be sufficient on
+# its own for something named like this.
+_DESTRUCTIVE_NAME_TOKENS = (
+    "destroy", "teardown", "tear-down", "nuke", "purge", "wipe", "decommission",
+)
+
+
+def name_suggests_destructive(name: str) -> str | None:
+    """Returns the matched token if a resource/job name itself suggests
+    destructive intent, else None."""
+    low = name.lower()
+    for token in _DESTRUCTIVE_NAME_TOKENS:
+        if token in low:
+            return token
+    return None
+
+
 def command_is_dangerous(command: str) -> str | None:
     """
     Returns the matched dangerous token if the raw command looks destructive,

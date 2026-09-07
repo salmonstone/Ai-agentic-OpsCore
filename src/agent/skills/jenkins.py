@@ -304,7 +304,8 @@ class JenkinsSkill(BaseSkill):
         unlike scan(), which only surfaces failing ones with a diagnosis."""
         return jk.get_all_jobs(folder)
 
-    def trigger_build(self, job_name: str, params: dict | None = None) -> int:
+    def trigger_build(self, job_name: str, params: dict | None = None,
+                       confirm_destructive_name: bool = False) -> int:
         """
         Directly trigger a build for a named job — a deliberate, explicit
         action the caller asked for, not an autonomous decision, so this
@@ -312,10 +313,23 @@ class JenkinsSkill(BaseSkill):
         (that gate is for AI-initiated fixes, not a human/client explicitly
         naming a job and asking for a build).
 
+        If job_name itself suggests destructive intent (contains "destroy",
+        "teardown", "nuke", "purge", "wipe", "decommission"), the caller
+        having reached this method at all is NOT sufficient — a distinct
+        confirm_destructive_name=True is required in addition, so a single
+        upstream "yes" can never be enough for something named like this.
+
         Returns the Jenkins queue item id (not the eventual build number —
         Jenkins assigns that once an executor is free). -1 if Jenkins didn't
         return a usable queue location.
         """
+        token = safety.name_suggests_destructive(job_name)
+        if token and not confirm_destructive_name:
+            raise ValueError(
+                f"'{job_name}' looks destructive (matched '{token}'). "
+                "Pass confirm_destructive_name=True after getting a distinct, explicit "
+                "acknowledgment — a normal confirmation is not enough for this."
+            )
         jobs = {j.name: j for j in jk.get_all_jobs()}
         if job_name not in jobs:
             raise ValueError(f"No such Jenkins job: '{job_name}'.")
