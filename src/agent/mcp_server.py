@@ -45,6 +45,40 @@ async def jenkins_scan() -> dict:
 
 
 @mcp.tool()
+async def jenkins_list_jobs(folder: str | None = None) -> list[dict]:
+    """List every Jenkins job, regardless of pass/fail status — unlike
+    jenkins_scan, which only surfaces failing ones. Read-only.
+
+    folder: list only jobs inside this folder, or omit for everything.
+    """
+    def _run():
+        from agent.skills.jenkins import JenkinsSkill
+        return [j.model_dump() for j in JenkinsSkill().list_jobs(folder)]
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def jenkins_trigger_build(job_name: str, confirm: bool = False) -> dict:
+    """Directly trigger a build for a named Jenkins job — no diagnosis, just
+    runs it. This is a deliberate action the caller explicitly asked for by
+    naming the job, not an autonomous fix, so it isn't gated by the
+    problem/confidence-based safety policy the way jenkins_apply_fix is —
+    but it still requires confirm=True before anything actually runs.
+
+    job_name: exact Jenkins job name, e.g. "backend-api/main".
+    confirm: must be explicitly True, or nothing is triggered.
+    """
+    def _run():
+        from agent.skills.jenkins import JenkinsSkill
+
+        if not confirm:
+            return {"triggered": False, "message": "Set confirm=True to actually trigger this build."}
+        queue_id = JenkinsSkill().trigger_build(job_name)
+        return {"triggered": True, "queue_id": queue_id}
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def jenkins_diagnose(job_name: str, build_number: int | None = None) -> dict:
     """Deep-dive AI diagnosis of one Jenkins job's failure (root cause,
     confidence, suggested fix). Read-only — does not apply any fix.

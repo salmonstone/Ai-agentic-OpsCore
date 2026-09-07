@@ -294,6 +294,41 @@ class JenkinsSkill(BaseSkill):
         return report
 
     # ------------------------------------------------------------------
+    # list_jobs / trigger_build — pure data-fetch and direct action, no AI
+    # reasoning involved, so these skip Claude entirely (deterministic code
+    # for deterministic operations).
+    # ------------------------------------------------------------------
+
+    def list_jobs(self, folder: str | None = None) -> list[JenkinsJob]:
+        """Every job Jenkins knows about, regardless of pass/fail status —
+        unlike scan(), which only surfaces failing ones with a diagnosis."""
+        return jk.get_all_jobs(folder)
+
+    def trigger_build(self, job_name: str, params: dict | None = None) -> int:
+        """
+        Directly trigger a build for a named job — a deliberate, explicit
+        action the caller asked for, not an autonomous decision, so this
+        does NOT go through the safety/policy engine's auto-fix gating
+        (that gate is for AI-initiated fixes, not a human/client explicitly
+        naming a job and asking for a build).
+
+        Returns the Jenkins queue item id (not the eventual build number —
+        Jenkins assigns that once an executor is free). -1 if Jenkins didn't
+        return a usable queue location.
+        """
+        jobs = {j.name: j for j in jk.get_all_jobs()}
+        if job_name not in jobs:
+            raise ValueError(f"No such Jenkins job: '{job_name}'.")
+        queue_id = jk.retrigger_build(job_name, params)
+        log.info("jenkins.trigger_build", job=job_name, queue_id=queue_id)
+        remember(
+            content=f"Manually triggered a build for {job_name}.",
+            source="jenkins-trigger",
+            metadata={"job": job_name, "queue_id": queue_id},
+        )
+        return queue_id
+
+    # ------------------------------------------------------------------
     # diagnose — pattern match first (free), Claude only if unclear
     # ------------------------------------------------------------------
 

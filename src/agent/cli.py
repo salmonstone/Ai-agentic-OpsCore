@@ -5455,6 +5455,91 @@ def jenkins_scan() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Command: agent jenkins jobs
+# ---------------------------------------------------------------------------
+
+@jenkins_app.command("jobs")
+def jenkins_jobs(
+    folder: str | None = typer.Option(None, "--folder", help="List only jobs inside this folder."),
+) -> None:
+    """List every Jenkins job, regardless of pass/fail status — unlike
+    `scan`, which only shows failing ones."""
+    try:
+        from agent.skills.jenkins import JenkinsSkill
+
+        console.print()
+        with console.status("[bold cyan]Fetching jobs...[/bold cyan]", spinner="dots"):
+            jobs = JenkinsSkill().list_jobs(folder)
+
+        if not jobs:
+            console.print("[dim]No jobs found on this Jenkins instance.[/dim]\n")
+            return
+
+        table = Table(title=f"Jenkins Jobs ({len(jobs)})", show_lines=False,
+                      header_style="bold cyan", border_style="dim")
+        table.add_column("Job", no_wrap=True)
+        table.add_column("Status")
+        table.add_column("Last Build", justify="center")
+        table.add_column("Type")
+        for j in jobs:
+            if j.is_folder:
+                status = "[dim]folder[/dim]"
+            elif j.is_failing:
+                status = f"[bold red]{_escape(j.color)}[/bold red]"
+            else:
+                status = f"[green]{_escape(j.color)}[/green]"
+            build_col = f"#{j.last_build_number}" if j.last_build_number is not None else "[dim]never run[/dim]"
+            table.add_row(j.name, status, build_col, "folder" if j.is_folder else "job")
+        console.print(table)
+        console.print()
+        console.print("  Run: [cyan]agent jenkins trigger <job>[/cyan]  (trigger a build)")
+        console.print("  Run: [cyan]agent jenkins diagnose <job>[/cyan]  (deep dive a failure)\n")
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Command: agent jenkins trigger JOB_NAME
+# ---------------------------------------------------------------------------
+
+@jenkins_app.command("trigger")
+def jenkins_trigger(
+    job_name: str = typer.Argument(..., help="Exact Jenkins job name, e.g. backend-api/main."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Directly trigger a build for a job — no diagnosis, just runs it."""
+    try:
+        from agent.skills.jenkins import JenkinsSkill
+
+        if not yes and not typer.confirm(f"Trigger a new build for '{job_name}'?", default=False):
+            console.print("[dim]Cancelled.[/dim]\n")
+            return
+
+        console.print()
+        with console.status(f"[bold cyan]Triggering {job_name}...[/bold cyan]", spinner="dots"):
+            queue_id = JenkinsSkill().trigger_build(job_name)
+
+        if queue_id >= 0:
+            console.print(f"  [bold green]✓ Queued.[/bold green]  Queue item id: {queue_id}")
+        else:
+            console.print("  [bold green]✓ Triggered[/bold green]  [dim](Jenkins didn't return a queue id)[/dim]")
+        console.print(f"  [dim]Check progress:[/dim] agent jenkins jobs\n")
+
+    except ValueError as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Command: agent jenkins diagnose JOB_NAME
 # ---------------------------------------------------------------------------
 
