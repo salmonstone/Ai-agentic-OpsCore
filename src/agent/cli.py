@@ -8380,12 +8380,23 @@ def k8s_switch(
 def k8s_add_cluster(
     name:    str = typer.Option(..., "--name",    help="EKS cluster name"),
     region:  str = typer.Option(..., "--region",  help="AWS region (e.g. us-east-1)"),
-    profile: str = typer.Option("default", "--profile", help="AWS CLI profile", show_default=True),
+    profile: str = typer.Option("", "--profile", help="AWS CLI profile "
+                                 "(defaults to your configured AWS_PROFILE, or 'default' if unset)"),
     rename:  str = typer.Option("", "--rename",  help="Rename context after adding"),
 ) -> None:
     """Add an EKS cluster to your kubeconfig via aws eks update-kubeconfig."""
     try:
+        from agent.config import settings
         from agent.skills.multi_cluster import MultiClusterSkill
+
+        # Without an explicit --profile, this must match whatever profile
+        # `agent aws auth-status` actually resolves to — not a hardcoded
+        # "default" string, which silently pointed at the wrong (often
+        # nonexistent) AWS CLI profile whenever AWS_PROFILE was set to
+        # anything else and caused a confusing UnrecognizedClientException
+        # even though the configured auth was fine.
+        if not profile:
+            profile = settings.aws_profile if settings.aws_auth_method == "sso_profile" and settings.aws_profile else "default"
 
         skill = MultiClusterSkill()
         console.print()
