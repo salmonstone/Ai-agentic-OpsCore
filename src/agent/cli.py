@@ -5564,6 +5564,45 @@ def jenkins_trigger(
 
 
 # ---------------------------------------------------------------------------
+# Command: agent jenkins log JOB_NAME
+# ---------------------------------------------------------------------------
+
+@jenkins_app.command("log")
+def jenkins_log(
+    job_name: str = typer.Argument(..., help="Exact Jenkins job name."),
+    build:    int = typer.Option(0, "--build", "-b", help="Build number (0 = latest)."),
+    tail:     int = typer.Option(200, "--tail", "-n", help="Number of lines from the end."),
+) -> None:
+    """Print the raw Jenkins console log — no AI summarization, the actual text."""
+    try:
+        # Direct integration call, not JenkinsSkill — same reasoning as
+        # `agent jenkins jobs`/`trigger`: no AI/memory needed for a raw log read.
+        from agent.integrations import jenkins as jk
+
+        build_number = build
+        if not build_number:
+            jobs = {j.name: j for j in jk.get_all_jobs()}
+            if job_name not in jobs:
+                raise ValueError(f"No such Jenkins job: '{job_name}'.")
+            build_number = jobs[job_name].last_build_number
+            if not build_number:
+                raise ValueError(f"'{job_name}' has no build history yet.")
+
+        text = jk.get_console_log(job_name, build_number, tail_lines=tail)
+        console.print(Rule(f"[bold cyan]{_escape(job_name)} #{build_number}[/bold cyan]"))
+        console.print(text)
+        console.print()
+    except ValueError as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Command: agent jenkins diagnose JOB_NAME
 # ---------------------------------------------------------------------------
 
