@@ -310,6 +310,24 @@ async def cost_analyze(days: int = 30) -> dict:
 
 
 @mcp.tool()
+async def aws_scan(region: str = "", services: str = "ec2,rds,alb") -> dict:
+    """Scan the AWS account for unhealthy EC2, RDS, and ALB resources —
+    each finding includes an AI root-cause diagnosis. Read-only.
+
+    region: AWS region to scan; defaults to your configured AWS_REGION.
+    services: comma-separated subset to check — ec2, rds, alb.
+    """
+    def _run():
+        from agent.config import settings
+        from agent.skills.aws import AwsSkill
+
+        svc_list = [s.strip().lower() for s in services.split(",") if s.strip()]
+        diagnoses = AwsSkill().scan_account(region or settings.aws_region, svc_list)
+        return {"count": len(diagnoses), "diagnoses": [d.model_dump() for d in diagnoses]}
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def aws_auth_status() -> dict:
     """Verify the configured AWS auth method (IAM role / access key / SSO
     profile) currently works, and return the resolved identity. Read-only."""
@@ -436,6 +454,47 @@ async def tls_apply_fix(name: str, namespace: str, kind: str = "certificate", co
 
         ok = skill.apply_fix(diagnosis.fix_command, name, namespace)
         return {"applied": ok, "fix_command": diagnosis.fix_command, "diagnosis": diagnosis.model_dump()}
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def aws_apply_fix(resource_id: str, resource_type: str, region: str = "", confirm: bool = False) -> dict:
+    """Diagnose one specific AWS resource and apply the suggested fix —
+    scoped to exactly this one resource, never account-wide.
+
+    resource_id: instance ID, DB identifier, or target group ARN.
+    resource_type: "ec2" | "rds" | "alb".
+    region: AWS region; defaults to your configured AWS_REGION.
+    confirm: must be explicitly True, or nothing is applied — the diagnosis
+        and proposed fix are returned instead so the caller can review first.
+    """
+    def _run():
+        from agent.config import settings
+        from agent.core.models import AwsResource, AwsResourceType
+        from agent.skills.aws import AwsSkill
+
+        type_map = {"ec2": AwsResourceType.EC2, "rds": AwsResourceType.RDS, "alb": AwsResourceType.ALB}
+        rtype = type_map.get(resource_type.lower())
+        if rtype is None:
+            return {"applied": False, "message": f"Unknown resource type: {resource_type!r}. Use: ec2, rds, alb"}
+
+        skill = AwsSkill()
+        resource = AwsResource(
+            id=resource_id, name=resource_id, resource_type=rtype,
+            status="unknown", region=region or settings.aws_region,
+        )
+        diagnosis = skill.diagnose_resource(resource)
+
+        if not diagnosis.fix_command:
+            return {"applied": False, "message": "No automated fix command available for this issue.",
+                    "diagnosis": diagnosis.model_dump()}
+
+        if not confirm:
+            return {"applied": False, "message": "Set confirm=True to actually apply this fix.",
+                    "diagnosis": diagnosis.model_dump()}
+
+        success = skill.apply_fix(diagnosis)
+        return {"applied": success, "diagnosis": diagnosis.model_dump()}
     return await asyncio.to_thread(_run)
 
 
