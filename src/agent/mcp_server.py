@@ -165,6 +165,25 @@ async def k8s_scan(namespace: str = "all") -> list[dict]:
 
 
 @mcp.tool()
+async def k8s_list_pods(namespace: str = "all", status_filter: str | None = None) -> list[dict]:
+    """List every pod in the cluster (or one namespace), regardless of health —
+    unlike k8s_scan, which only surfaces problem pods. Read-only.
+
+    namespace: Kubernetes namespace to list, or "all" for every namespace.
+    status_filter: optional exact status to filter by (e.g. "Running", "Pending",
+        "CrashLoopBackOff"). Omit to return every pod.
+    """
+    def _run():
+        from agent.integrations.kubectl import get_pods
+
+        pods = get_pods(namespace)
+        if status_filter:
+            pods = [p for p in pods if p.status.lower() == status_filter.lower()]
+        return [p.model_dump() for p in pods]
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def k8s_diagnose(pod_name: str, namespace: str) -> dict:
     """Deep AI diagnosis of one specific pod's problem (root cause, suggested
     fix). Read-only — does not apply any fix.
