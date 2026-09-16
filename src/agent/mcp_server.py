@@ -41,9 +41,38 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("atlasos")
-
 _TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
+
+# Public hostname(s) this server is reached by, e.g. an ngrok domain. MCP's
+# streamable-http transport validates the Host header to block DNS-rebinding
+# attacks, and rejects anything not on this list with 421 Misdirected Request
+# — so a tunnelled request fails until its hostname is named here. Hostname
+# wildcards are NOT supported upstream (only ":*" port wildcards), so each
+# public host must be listed exactly. Comma-separated.
+_ALLOWED_HOSTS = [h.strip() for h in os.getenv("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+
+
+def _transport_security():
+    """Extend Host-header validation to the configured public hostnames.
+
+    Returns None when none are configured, which leaves the library default
+    (localhost only) untouched — this must stay a widening of the allowlist,
+    never a disabling of the protection.
+    """
+    if not _ALLOWED_HOSTS:
+        return None
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    local = ["localhost", "127.0.0.1", "localhost:*", "127.0.0.1:*"]
+    return TransportSecuritySettings(
+        allowed_hosts=local + _ALLOWED_HOSTS,
+        allowed_origins=[f"https://{h}" for h in _ALLOWED_HOSTS]
+                        + [f"http://{h}" for h in _ALLOWED_HOSTS]
+                        + [f"http://{h}" for h in local],
+    )
+
+
+mcp = FastMCP("atlasos", transport_security=_transport_security())
 
 # Readonly defaults to ON for any networked transport and OFF for stdio: a
 # remote client is untrusted by default, the local operator is not. Either
@@ -743,6 +772,10 @@ def _serve_http() -> None:
     app = _BearerAuthMiddleware(mcp.streamable_http_app(), token)
     print(f"atlasos MCP — http://{host}:{port}/mcp  "
           f"(readonly={'on' if _READONLY else 'OFF — full tool set exposed'})")
+    hosts_desc = ", ".join(_ALLOWED_HOSTS) if _ALLOWED_HOSTS else "localhost only"
+    print(f"  allowed hosts: {hosts_desc}")
+    if not _ALLOWED_HOSTS:
+        print("  (tunnelled requests will 421 until MCP_ALLOWED_HOSTS=<tunnel-domain> is set)")
     uvicorn.run(app, host=host, port=port)
 
 
