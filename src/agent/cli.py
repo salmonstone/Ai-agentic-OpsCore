@@ -8680,7 +8680,7 @@ def k8s_rollback(
         import time as _time
         from agent.integrations.kubectl import get_deployment_info, rollout_undo, wait_for_rollout
         from agent.observability.costs import get_session_total
-        from agent.skills.deployment import DeploymentSkill
+        from agent.skills.deployment import DeploymentSkill, _is_production
 
         console.print()
         console.print(Rule(
@@ -8779,7 +8779,7 @@ def k8s_scale(
     try:
         from agent.integrations.kubectl import get_deployment_info, scale_deployment
         from agent.observability.costs import get_session_total
-        from agent.skills.deployment import DeploymentSkill
+        from agent.skills.deployment import DeploymentSkill, _is_production
 
         console.print()
         console.print(Rule(
@@ -8900,7 +8900,7 @@ def k8s_deploy(
         import time as _time
         from agent.integrations.kubectl import get_deployment_info, set_image, wait_for_rollout
         from agent.observability.costs import get_session_total
-        from agent.skills.deployment import DeploymentSkill
+        from agent.skills.deployment import DeploymentSkill, _is_production
 
         console.print()
         console.print(Rule(
@@ -9007,7 +9007,7 @@ def k8s_restart_deployment(
         import time as _time
         from agent.integrations.kubectl import get_deployment_info, rollout_restart, wait_for_rollout
         from agent.observability.costs import get_session_total
-        from agent.skills.deployment import DeploymentSkill
+        from agent.skills.deployment import DeploymentSkill, _is_production
 
         console.print()
         console.print(Rule(
@@ -11649,7 +11649,7 @@ def deploy_approve(
 ) -> None:
     """Approve and execute a pending webhook deploy with full health watching."""
     from agent.integrations.deploy_db import get_pending
-    from agent.skills.deployment import DeploymentSkill
+    from agent.skills.deployment import DeploymentSkill, _is_production
 
     console.print()
     p = get_pending(deploy_id)
