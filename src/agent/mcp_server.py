@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+from urllib.parse import parse_qs
 
 from mcp.server.fastmcp import FastMCP
 
@@ -720,26 +721,40 @@ async def incident_correlate(minutes: int = 30) -> dict:
 class _BearerAuthMiddleware:
     """Pure-ASGI bearer-token gate in front of the MCP app.
 
-    Compared with constant time (hmac.compare_digest) so a wrong token can't
-    be recovered by timing the rejection.
+    Accepts the token either as `Authorization: Bearer <token>` or as a
+    `?token=<token>` query parameter. The query-string form exists because
+    some MCP clients (ChatGPT's custom connectors among them) only offer
+    "no authentication" or full OAuth — with no way to attach a static
+    header — so without it the only options would be implementing an OAuth
+    server or exposing the tools unauthenticated.
+
+    The header form is preferable where a client supports it: a URL is more
+    likely to be written to a proxy/tunnel access log or shell history than
+    a header is. Over HTTPS both are encrypted in transit.
+
+    Both comparisons use hmac.compare_digest so a wrong token can't be
+    recovered by timing the rejection.
     """
 
     def __init__(self, app, token: str) -> None:
         self._app = app
         self._expected = f"Bearer {token}".encode()
+        self._token = token.encode()
+
+    def _authorized(self, scope) -> bool:
+        for key, value in scope.get("headers") or []:
+            if key.lower() == b"authorization" and hmac.compare_digest(value, self._expected):
+                return True
+
+        query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+        return any(hmac.compare_digest(t.encode(), self._token) for t in query.get("token", []))
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
 
-        provided = b""
-        for key, value in scope.get("headers") or []:
-            if key.lower() == b"authorization":
-                provided = value
-                break
-
-        if not hmac.compare_digest(provided, self._expected):
+        if not self._authorized(scope):
             await send({
                 "type": "http.response.start",
                 "status": 401,
