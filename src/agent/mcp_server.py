@@ -23,14 +23,53 @@ ARCHITECTURE2.md section 6 for the full tiering rationale.
 
 Run (stdio transport, for a local MCP client):
     uv run python -m agent.mcp_server
+
+Run (HTTP transport, for a remote MCP client such as ChatGPT via a tunnel):
+    MCP_TRANSPORT=http MCP_AUTH_TOKEN=<secret> uv run python -m agent.mcp_server
+
+HTTP mode refuses to start without MCP_AUTH_TOKEN, and defaults to readonly
+(MCP_READONLY=1) so that a remote model cannot reach a mutating tool at all —
+those tools are never registered, so they do not appear in tools/list and
+cannot be called regardless of what the client asks for. stdio mode keeps the
+full tool set, since that is the local operator's own session.
 """
 from __future__ import annotations
 
 import asyncio
+import hmac
+import os
 
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("atlasos")
+
+_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
+
+# Readonly defaults to ON for any networked transport and OFF for stdio: a
+# remote client is untrusted by default, the local operator is not. Either
+# way an explicit MCP_READONLY=0/1 wins.
+_READONLY = os.getenv("MCP_READONLY", "0" if _TRANSPORT == "stdio" else "1").strip() == "1"
+
+
+def _mutating_tool():
+    """Register a tool that has real side effects, EXCEPT in readonly mode.
+
+    "Side effects" here is broader than the confirm=True tier: it also covers
+    tools that look read-only but aren't. dns_scan creates and deletes a probe
+    pod in the cluster, security_drift writes snapshot records into the memory
+    store, and incident_correlate opens incidents and can fire Slack alerts.
+    Exposing those to an untrusted remote model would let it create workloads
+    and page a human, so they are withheld alongside the *_apply_fix tools.
+
+    In readonly mode the function is returned unregistered — it never reaches
+    the MCP tool registry, so it is absent from tools/list rather than merely
+    refusing to run.
+    """
+    def decorator(fn):
+        if _READONLY:
+            return fn
+        return mcp.tool()(fn)
+    return decorator
 
 
 @mcp.tool()
@@ -62,7 +101,7 @@ async def jenkins_list_jobs(folder: str | None = None) -> list[dict]:
     return await asyncio.to_thread(_run)
 
 
-@mcp.tool()
+@_mutating_tool()
 async def jenkins_trigger_build(job_name: str, confirm: bool = False,
                                  confirm_destructive_name: bool = False) -> dict:
     """Directly trigger a build for a named Jenkins job — no diagnosis, just
@@ -209,7 +248,7 @@ async def k8s_diagnose(pod_name: str, namespace: str) -> dict:
     return await asyncio.to_thread(_run)
 
 
-@mcp.tool()
+@_mutating_tool()
 async def k8s_apply_fix(pod_name: str, namespace: str, confirm: bool = False) -> dict:
     """Diagnose one specific pod and apply the suggested kubectl fix — scoped
     to exactly this one pod, never a bulk/cluster-wide operation.
@@ -281,7 +320,7 @@ async def security_audit(namespace: str = "all") -> dict:
     return await asyncio.to_thread(_run)
 
 
-@mcp.tool()
+@_mutating_tool()
 async def security_drift(namespace: str = "all") -> dict:
     """Security audit that only reports what's NEW since the last scan of
     this cluster (new findings, resolved count, unchanged count) — instead
@@ -354,7 +393,7 @@ async def aws_auth_status() -> dict:
 # without it, they return the diagnosis/fix that WOULD run and do nothing.
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@_mutating_tool()
 async def jenkins_apply_fix(job_name: str, build_number: int | None = None, confirm: bool = False) -> dict:
     """Diagnose a Jenkins job's failure and apply the suggested fix (retrigger,
     restart agent, clear workspace, or cancel+retrigger). Does NOT wait for the
@@ -400,7 +439,7 @@ async def jenkins_apply_fix(job_name: str, build_number: int | None = None, conf
     return await asyncio.to_thread(_run)
 
 
-@mcp.tool()
+@_mutating_tool()
 async def ingress_apply_fix(name: str, namespace: str = "default", confirm: bool = False) -> dict:
     """Diagnose an Ingress resource's problem and apply the suggested kubectl
     fix.
@@ -428,7 +467,7 @@ async def ingress_apply_fix(name: str, namespace: str = "default", confirm: bool
     return await asyncio.to_thread(_run)
 
 
-@mcp.tool()
+@_mutating_tool()
 async def tls_apply_fix(name: str, namespace: str, kind: str = "certificate", confirm: bool = False) -> dict:
     """Diagnose a TLS certificate/issuer problem and apply the suggested
     kubectl fix.
@@ -457,7 +496,7 @@ async def tls_apply_fix(name: str, namespace: str, kind: str = "certificate", co
     return await asyncio.to_thread(_run)
 
 
-@mcp.tool()
+@_mutating_tool()
 async def aws_apply_fix(resource_id: str, resource_type: str, region: str = "", confirm: bool = False) -> dict:
     """Diagnose one specific AWS resource and apply the suggested fix —
     scoped to exactly this one resource, never account-wide.
@@ -498,7 +537,7 @@ async def aws_apply_fix(resource_id: str, resource_type: str, region: str = "", 
     return await asyncio.to_thread(_run)
 
 
-@mcp.tool()
+@_mutating_tool()
 async def cost_apply_fix(fix_id: str, days: int = 30, confirm: bool = False) -> dict:
     """Apply one specific AWS cost-saving fix by ID (from a prior cost_analyze
     call's "savings_plan" list) — e.g. an EBS gp2->gp3 upgrade or a CloudWatch
@@ -549,7 +588,7 @@ async def memory_search(query: str, limit: int = 5) -> list[dict]:
     return await asyncio.to_thread(_run)
 
 
-@mcp.tool()
+@_mutating_tool()
 async def dns_scan() -> dict:
     """Full DNS health audit — CoreDNS pods, config, resolution tests,
     external-dns, ndots. Read-only."""
@@ -633,7 +672,7 @@ async def project_status() -> dict:
     return await asyncio.to_thread(_run)
 
 
-@mcp.tool()
+@_mutating_tool()
 async def incident_correlate(minutes: int = 30) -> dict:
     """Correlate deploys, autonomous daemon actions, and every skill's memory
     within a time window into ONE incident with a causal timeline, instead of
@@ -649,5 +688,66 @@ async def incident_correlate(minutes: int = 30) -> dict:
     return await asyncio.to_thread(_run)
 
 
+class _BearerAuthMiddleware:
+    """Pure-ASGI bearer-token gate in front of the MCP app.
+
+    Compared with constant time (hmac.compare_digest) so a wrong token can't
+    be recovered by timing the rejection.
+    """
+
+    def __init__(self, app, token: str) -> None:
+        self._app = app
+        self._expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        provided = b""
+        for key, value in scope.get("headers") or []:
+            if key.lower() == b"authorization":
+                provided = value
+                break
+
+        if not hmac.compare_digest(provided, self._expected):
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"www-authenticate", b"Bearer")],
+            })
+            await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
+            return
+
+        await self._app(scope, receive, send)
+
+
+def _serve_http() -> None:
+    import uvicorn
+
+    token = os.getenv("MCP_AUTH_TOKEN", "").strip()
+    if not token:
+        # Fail closed. This server reaches real Jenkins/EKS/AWS credentials on
+        # this machine, so it must never bind a network port unauthenticated —
+        # not even on localhost, since the whole point of HTTP mode is that a
+        # tunnel will be pointed at it.
+        raise SystemExit(
+            "MCP_AUTH_TOKEN is required for HTTP transport and is not set.\n"
+            "Generate one, e.g.:  python -c \"import secrets;print(secrets.token_urlsafe(32))\""
+        )
+
+    host = os.getenv("MCP_HOST", "127.0.0.1")
+    port = int(os.getenv("MCP_PORT", "8000"))
+
+    app = _BearerAuthMiddleware(mcp.streamable_http_app(), token)
+    print(f"atlasos MCP — http://{host}:{port}/mcp  "
+          f"(readonly={'on' if _READONLY else 'OFF — full tool set exposed'})")
+    uvicorn.run(app, host=host, port=port)
+
+
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    if _TRANSPORT in ("http", "streamable-http"):
+        _serve_http()
+    else:
+        mcp.run(transport="stdio")

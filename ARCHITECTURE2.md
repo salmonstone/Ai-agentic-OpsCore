@@ -345,6 +345,36 @@ Tier 3 — never exposed as MCP tools: agent setup, agent aws switch-auth,
 
 **Verified live**, via the real `mcp.call_tool()` protocol path, not just direct skill calls: `aws_auth_status` (returned the real IAM identity), `k8s_scan` (returned a real pod restart warning from the live cluster), `jenkins_scan`/`jenkins_auth_status` (against a real EC2-hosted Jenkins, both before and after it was configured), `run_eval` (ran the real `security` eval suite, 8/8 passed), `project_status` (a real filesystem/runtime scan), `memory_search` and `deploy_status` (both correctly returned empty against real, empty state), and `k8s_diagnose` (correctly diagnosed a real healthy pod as needing no action). `dns_scan`'s MCP wrapper has one known limitation: `DNSSkill.scan()` prints its findings directly to the terminal via Rich rather than returning them as structured data, so the MCP tool only gets back `{"report": "scan_complete"}` — real findings are lost over that path. Not a bug introduced by the MCP layer; a pre-existing shape mismatch in that one skill worth fixing if `dns_scan` needs to be genuinely useful over MCP later.
 
+### 6.1 Remote (HTTP) transport — exposing AtlasOS to a third-party MCP client
+
+`stdio` only works for a client running on this machine, because the client *spawns the server as a subprocess*. To let a cloud-hosted client (ChatGPT, or any remote MCP consumer) use these tools, the same server also runs over `streamable-http`:
+
+```bash
+MCP_TRANSPORT=http MCP_AUTH_TOKEN=<secret> uv run python -m agent.mcp_server
+ngrok http 8000          # or any tunnel — gives the client a public URL
+```
+
+| env var | default | meaning |
+|---|---|---|
+| `MCP_TRANSPORT` | `stdio` | `http` / `streamable-http` to serve over a port |
+| `MCP_AUTH_TOKEN` | *(none)* | required in HTTP mode; server **refuses to start** without it |
+| `MCP_READONLY` | `0` on stdio, `1` on http | `1` withholds every side-effecting tool |
+| `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `8000` | bind address |
+
+**The credential boundary is the point.** AWS keys, the Jenkins token and the kubeconfig never leave this machine — the remote client only ever sends `{"tool": ..., "args": ...}` and receives the JSON result. The `MCP_AUTH_TOKEN` the client holds is a *separate* secret that only gates access to this server; it grants nothing on AWS directly. What *does* cross the boundary is tool **output** (ARNs, account IDs, log excerpts), which lands in the third-party provider's context — so tool results, not credentials, are the real disclosure surface to reason about.
+
+**Readonly is default-on for networked transports, default-off for stdio** — the local operator is trusted, an internet-reachable client is not. Withheld tools are *never registered*, so they're absent from `tools/list` and a call returns `Unknown tool` rather than a refusal. That distinction matters: there is no flag the remote model can set, and no prompt it can construct, that reaches a withheld tool.
+
+**The withheld set is 10 tools, and deriving it surfaced a real mislabeling.** The obvious seven are the `*_apply_fix` / `trigger_build` mutators. But three tools sitting in the "read-only" tier were not actually read-only:
+
+- `dns_scan` — runs `kubectl run agent-dns-probe` and then deletes it: it **creates a workload** in the live cluster.
+- `security_drift` — writes snapshot records into the memory store on every call (that's how drift is computed across runs).
+- `incident_correlate` — opens/updates rows in `incident_db` and **can fire Slack alerts**, i.e. it can page a human.
+
+Exposing the Tier-1 list verbatim would therefore have handed an untrusted remote model the ability to schedule pods and wake someone up at 3am. Worth noting *why* the mislabel happened: the original tiering asked "does this need `confirm=True`?" — a question about *infrastructure mutation* — and these three slipped through because their side effects are on the cluster's scheduler, the local datastore, and the paging system rather than on a managed resource. The tier boundary for remote exposure is a different question ("does calling this change any observable state?") and needed re-deriving from scratch rather than inheriting.
+
+**Verified end-to-end over real HTTP**, not in-process: unauthenticated request → `401`; wrong bearer token → `401`; correct token → `200`; `tools/list` over a real session returns exactly 18 tools with none of the 10 withheld present; `aws_auth_status` returned the live IAM identity; and `jenkins_trigger_build` with `confirm:true` explicitly set returned `Unknown tool` — unreachable rather than merely declined. `stdio` still registers all 28, and the Jenkins eval suite passes 12/12, confirming no regression to the local path.
+
 ---
 
 ## 7. Other Subsystems (Breadth)
