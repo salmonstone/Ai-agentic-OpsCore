@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+from typing import Any
 from urllib.parse import parse_qs
 
 from mcp.server.fastmcp import FastMCP
@@ -103,7 +104,7 @@ def _mutating_tool():
 
 
 @mcp.tool()
-async def jenkins_scan() -> dict:
+async def jenkins_scan() -> dict[str, Any]:
     """Scan all Jenkins jobs, agents, and the build queue; returns health score,
     failing jobs, offline agents, stuck queue items, and an AI diagnosis for
     each failure. Read-only — makes no changes to Jenkins."""
@@ -133,7 +134,7 @@ async def jenkins_list_jobs(folder: str | None = None) -> list[dict]:
 
 @_mutating_tool()
 async def jenkins_trigger_build(job_name: str, confirm: bool = False,
-                                 confirm_destructive_name: bool = False) -> dict:
+                                 confirm_destructive_name: bool = False) -> dict[str, Any]:
     """Directly trigger a build for a named Jenkins job — no diagnosis, just
     runs it. This is a deliberate action the caller explicitly asked for by
     naming the job, not an autonomous fix, so it isn't gated by the
@@ -181,7 +182,7 @@ async def jenkins_trigger_build(job_name: str, confirm: bool = False,
 
 
 @mcp.tool()
-async def jenkins_diagnose(job_name: str, build_number: int | None = None) -> dict:
+async def jenkins_diagnose(job_name: str, build_number: int | None = None) -> dict[str, Any]:
     """Deep-dive AI diagnosis of one Jenkins job's failure (root cause,
     confidence, suggested fix). Read-only — does not apply any fix.
 
@@ -212,7 +213,7 @@ async def jenkins_diagnose(job_name: str, build_number: int | None = None) -> di
 
 
 @mcp.tool()
-async def jenkins_auth_status() -> dict:
+async def jenkins_auth_status() -> dict[str, Any]:
     """Verify the Jenkins connection and return version/executor/agent info."""
     def _run():
         from agent.integrations import jenkins as jk
@@ -253,7 +254,7 @@ async def k8s_list_pods(namespace: str = "all", status_filter: str | None = None
 
 
 @mcp.tool()
-async def k8s_diagnose(pod_name: str, namespace: str) -> dict:
+async def k8s_diagnose(pod_name: str, namespace: str) -> dict[str, Any]:
     """Deep AI diagnosis of one specific pod's problem (root cause, suggested
     fix). Read-only — does not apply any fix.
 
@@ -279,7 +280,7 @@ async def k8s_diagnose(pod_name: str, namespace: str) -> dict:
 
 
 @_mutating_tool()
-async def k8s_apply_fix(pod_name: str, namespace: str, confirm: bool = False) -> dict:
+async def k8s_apply_fix(pod_name: str, namespace: str, confirm: bool = False) -> dict[str, Any]:
     """Diagnose one specific pod and apply the suggested kubectl fix — scoped
     to exactly this one pod, never a bulk/cluster-wide operation.
 
@@ -318,7 +319,7 @@ async def k8s_apply_fix(pod_name: str, namespace: str, confirm: bool = False) ->
 
 
 @mcp.tool()
-async def tls_scan() -> dict:
+async def tls_scan() -> dict[str, Any]:
     """Audit TLS certificates across every Ingress in the cluster — expiry,
     cert-manager status, ACME challenges, secret validity. Read-only."""
     def _run():
@@ -328,7 +329,7 @@ async def tls_scan() -> dict:
 
 
 @mcp.tool()
-async def ingress_scan() -> dict:
+async def ingress_scan() -> dict[str, Any]:
     """Diagnose nginx ingress, external-IP, and routing problems across the
     cluster. Read-only — does not apply any fix."""
     def _run():
@@ -338,7 +339,7 @@ async def ingress_scan() -> dict:
 
 
 @mcp.tool()
-async def security_audit(namespace: str = "all") -> dict:
+async def security_audit(namespace: str = "all") -> dict[str, Any]:
     """Run a Kubernetes security audit (RBAC, pod security, network policies,
     exposed secrets) for the given namespace. Read-only.
 
@@ -351,7 +352,7 @@ async def security_audit(namespace: str = "all") -> dict:
 
 
 @_mutating_tool()
-async def security_drift(namespace: str = "all") -> dict:
+async def security_drift(namespace: str = "all") -> dict[str, Any]:
     """Security audit that only reports what's NEW since the last scan of
     this cluster (new findings, resolved count, unchanged count) — instead
     of repeating every finding every time. Read-only. First call on a
@@ -366,7 +367,7 @@ async def security_drift(namespace: str = "all") -> dict:
 
 
 @mcp.tool()
-async def cost_analyze(days: int = 30) -> dict:
+async def cost_analyze(days: int = 30) -> dict[str, Any]:
     """Full AWS cost optimization analysis — spend by service, waste detected,
     savings opportunities, spend anomalies, over a trailing window. Read-only.
 
@@ -379,7 +380,7 @@ async def cost_analyze(days: int = 30) -> dict:
 
 
 @mcp.tool()
-async def aws_scan(region: str = "", services: str = "ec2,rds,alb") -> dict:
+async def aws_scan(region: str = "", services: str = "ec2,rds,alb") -> dict[str, Any]:
     """Scan the AWS account for unhealthy EC2, RDS, and ALB resources —
     each finding includes an AI root-cause diagnosis. Read-only.
 
@@ -397,7 +398,7 @@ async def aws_scan(region: str = "", services: str = "ec2,rds,alb") -> dict:
 
 
 @mcp.tool()
-async def aws_auth_status() -> dict:
+async def aws_auth_status() -> dict[str, Any]:
     """Verify the configured AWS auth method (IAM role / access key / SSO
     profile) currently works, and return the resolved identity. Read-only."""
     def _run():
@@ -424,7 +425,7 @@ async def aws_auth_status() -> dict:
 # ---------------------------------------------------------------------------
 
 @_mutating_tool()
-async def jenkins_apply_fix(job_name: str, build_number: int | None = None, confirm: bool = False) -> dict:
+async def jenkins_apply_fix(job_name: str, build_number: int | None = None, confirm: bool = False) -> dict[str, Any]:
     """Diagnose a Jenkins job's failure and apply the suggested fix (retrigger,
     restart agent, clear workspace, or cancel+retrigger). Does NOT wait for the
     fix to be verified — call jenkins_scan again shortly after to check whether
@@ -470,7 +471,7 @@ async def jenkins_apply_fix(job_name: str, build_number: int | None = None, conf
 
 
 @_mutating_tool()
-async def ingress_apply_fix(name: str, namespace: str = "default", confirm: bool = False) -> dict:
+async def ingress_apply_fix(name: str, namespace: str = "default", confirm: bool = False) -> dict[str, Any]:
     """Diagnose an Ingress resource's problem and apply the suggested kubectl
     fix.
 
@@ -498,7 +499,7 @@ async def ingress_apply_fix(name: str, namespace: str = "default", confirm: bool
 
 
 @_mutating_tool()
-async def tls_apply_fix(name: str, namespace: str, kind: str = "certificate", confirm: bool = False) -> dict:
+async def tls_apply_fix(name: str, namespace: str, kind: str = "certificate", confirm: bool = False) -> dict[str, Any]:
     """Diagnose a TLS certificate/issuer problem and apply the suggested
     kubectl fix.
 
@@ -527,7 +528,7 @@ async def tls_apply_fix(name: str, namespace: str, kind: str = "certificate", co
 
 
 @_mutating_tool()
-async def aws_apply_fix(resource_id: str, resource_type: str, region: str = "", confirm: bool = False) -> dict:
+async def aws_apply_fix(resource_id: str, resource_type: str, region: str = "", confirm: bool = False) -> dict[str, Any]:
     """Diagnose one specific AWS resource and apply the suggested fix —
     scoped to exactly this one resource, never account-wide.
 
@@ -568,7 +569,7 @@ async def aws_apply_fix(resource_id: str, resource_type: str, region: str = "", 
 
 
 @_mutating_tool()
-async def cost_apply_fix(fix_id: str, days: int = 30, confirm: bool = False) -> dict:
+async def cost_apply_fix(fix_id: str, days: int = 30, confirm: bool = False) -> dict[str, Any]:
     """Apply one specific AWS cost-saving fix by ID (from a prior cost_analyze
     call's "savings_plan" list) — e.g. an EBS gp2->gp3 upgrade or a CloudWatch
     log retention policy. Only ever applies auto-fixable fixes.
@@ -619,7 +620,7 @@ async def memory_search(query: str, limit: int = 5) -> list[dict]:
 
 
 @_mutating_tool()
-async def dns_scan() -> dict:
+async def dns_scan() -> dict[str, Any]:
     """Full DNS health audit — CoreDNS pods, config, resolution tests,
     external-dns, ndots. Read-only."""
     def _run():
@@ -629,7 +630,7 @@ async def dns_scan() -> dict:
 
 
 @mcp.tool()
-async def domain_scan(domain: str) -> dict:
+async def domain_scan(domain: str) -> dict[str, Any]:
     """Check TLS/HTTPS status for a domain — certs, ingress, secrets. Read-only.
 
     domain: the domain name to check, e.g. "kibana.infragpt.online".
@@ -651,7 +652,7 @@ async def deploy_status() -> list[dict]:
 
 
 @mcp.tool()
-async def run_eval(skill_name: str) -> dict:
+async def run_eval(skill_name: str) -> dict[str, Any]:
     """Run one skill's eval suite (mocked external calls, real skill code,
     real Claude fallback where applicable) and return the pass rate, per-case
     results, and cost. Read-only — evals never write real memory rows.
@@ -678,7 +679,7 @@ async def run_eval(skill_name: str) -> dict:
 
 
 @mcp.tool()
-async def project_status() -> dict:
+async def project_status() -> dict[str, Any]:
     """Live snapshot of the AtlasOS project itself — file/line counts, skill
     inventory, eval suite coverage, and current runtime state (cluster
     connection, memory record count, daemon status). Purely a filesystem/
@@ -703,7 +704,7 @@ async def project_status() -> dict:
 
 
 @_mutating_tool()
-async def incident_correlate(minutes: int = 30) -> dict:
+async def incident_correlate(minutes: int = 30) -> dict[str, Any]:
     """Correlate deploys, autonomous daemon actions, and every skill's memory
     within a time window into ONE incident with a causal timeline, instead of
     treating each symptom as its own disconnected alert. Only opens/updates a
@@ -715,6 +716,274 @@ async def incident_correlate(minutes: int = 30) -> dict:
     def _run():
         from agent.skills.incident_correlation import IncidentCorrelationSkill
         return IncidentCorrelationSkill().correlate(minutes).model_dump()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def metrics_status() -> dict[str, Any]:
+    """Which time-series backends are reachable (Prometheus, CloudWatch) and
+    whether metric analysis is running degraded. Read-only.
+
+    Run this first when any metrics answer looks thin — "no Prometheus
+    configured" is a one-minute config fix, not something to diagnose around.
+    """
+    def _run():
+        from agent.skills.metrics import MetricsSkill
+        return MetricsSkill().status()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def metrics_analyze(target: str = ".*", namespace: str = "default",
+                          minutes: int = 60) -> dict[str, Any]:
+    """Time-series analysis of one target: golden signals (rate/errors/latency),
+    plus saturation, spike, drop, leak-shaped-trend and dead-scrape-target
+    detection. Read-only.
+
+    Detection is arithmetic and runs with or without an LLM; Claude only
+    narrates. Falls back to a single kubectl-top reading when Prometheus is
+    not configured, and says so via `degraded`.
+
+    target: pod-name regex, e.g. "checkout-api.*". Defaults to everything.
+    namespace: Kubernetes namespace.
+    minutes: window to analyse, default 60.
+    """
+    def _run():
+        from agent.skills.metrics import MetricsSkill
+        return MetricsSkill().analyze(target, namespace, minutes).model_dump()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def metrics_verify_recovery(target: str, namespace: str = "default",
+                                  minutes: int = 15) -> dict[str, Any]:
+    """Did a remediation actually work? Re-reads the metric window after a fix
+    and returns recovered / partial / not_recovered / unknown. Read-only.
+
+    This is the verification half of the remediation loop: every other fix
+    path in this system can confirm a fix RAN, not that the symptom stopped.
+
+    target: pod-name regex for the thing that was fixed.
+    namespace: Kubernetes namespace.
+    minutes: how far back to look, default 15.
+    """
+    def _run():
+        from agent.skills.metrics import MetricsSkill
+        return MetricsSkill().verify_recovery(target, namespace, minutes)
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def change_timeline(minutes: int = 60, namespace: str = "all") -> dict[str, Any]:
+    """Every infrastructure change in the window, as one ordered timeline —
+    k8s rollouts, scale events, our own deploy records, autonomous healer
+    actions, opened incidents, Jenkins builds and git commits. Read-only.
+
+    minutes: how far back to look, default 60.
+    namespace: Kubernetes namespace, or "all".
+    """
+    def _run():
+        from agent.skills.change import ChangeSkill
+        events = ChangeSkill().collect(minutes, namespace)
+        return {"window_minutes": minutes, "namespace": namespace,
+                "count": len(events), "events": [e.model_dump() for e in events]}
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def change_correlate(symptom: str, symptom_at: str | None = None,
+                           minutes: int = 60, namespace: str = "all") -> dict[str, Any]:
+    """Answer "what changed just before this broke?" — ranks every change in
+    the window against a symptom and names a prime suspect with a confidence
+    level. Read-only.
+
+    Scoring is deterministic: proximity in time, resource and namespace
+    overlap, and how risky that kind of change is. A change that happened
+    AFTER the symptom always scores zero and is excluded.
+
+    symptom: what is wrong, e.g. "checkout-api returning 502 in prod".
+    symptom_at: ISO8601 time the symptom started; defaults to now.
+    minutes: window to search, default 60.
+    namespace: Kubernetes namespace of the symptom, or "all".
+    """
+    def _run():
+        from agent.skills.change import ChangeSkill
+        return ChangeSkill().correlate(symptom, symptom_at, minutes, namespace).model_dump()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def topology_graph(namespace: str = "all") -> dict[str, Any]:
+    """Build the service dependency graph from live cluster state: ingress ->
+    service -> workload edges from real label selectors, plus inferred
+    workload -> service calls. Read-only.
+
+    Edges marked "(inferred)" come from container env values and are a
+    heuristic — do not treat them as authoritative.
+
+    namespace: Kubernetes namespace, or "all".
+    """
+    def _run():
+        from agent.skills.topology import TopologySkill
+        return TopologySkill().build(namespace).model_dump()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def blast_radius(name: str, kind: str = "workload",
+                       namespace: str = "default") -> dict[str, Any]:
+    """What else breaks if this component degrades — direct and transitive
+    dependents, whether a user-facing ingress path reaches it, and a severity.
+    Read-only.
+
+    Ask this BEFORE draining a node, restarting a shared service or approving
+    a risky fix.
+
+    name: exact resource name.
+    kind: workload | service | ingress. Default workload.
+    namespace: Kubernetes namespace.
+    """
+    def _run():
+        from agent.skills.topology import TopologySkill
+        return TopologySkill().blast_radius(kind, name, namespace).model_dump()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def workloads_scan(namespace: str = "all") -> dict[str, Any]:
+    """Controller-level Kubernetes scan: Deployments/StatefulSets short on
+    replicas or stuck mid-rollout, DaemonSets missing from nodes, Jobs past
+    their backoff limit, CronJobs suspended or no longer firing, unschedulable
+    pods with the scheduler's own reason, and PodDisruptionBudgets blocking
+    disruption. Read-only.
+
+    Complements k8s_scan, which is pod-centric: these failures are invisible
+    from a pod list.
+
+    namespace: Kubernetes namespace, or "all".
+    """
+    def _run():
+        from agent.skills.workloads import WorkloadsSkill
+        return WorkloadsSkill().scan(namespace).model_dump()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def workloads_diagnose(kind: str, name: str,
+                             namespace: str = "default") -> dict[str, Any]:
+    """Deep dive on one controller, including its status conditions — where
+    Kubernetes records WHY a rollout is stuck rather than merely that it is.
+    Read-only.
+
+    kind: deployment | statefulset | daemonset | job | cronjob.
+    name: exact workload name.
+    namespace: Kubernetes namespace.
+    """
+    def _run():
+        from agent.skills.workloads import WorkloadsSkill
+        return WorkloadsSkill().diagnose(kind, name, namespace)
+    return await asyncio.to_thread(_run)
+
+
+@_mutating_tool()
+async def workloads_apply_fix(kind: str, name: str, namespace: str,
+                              problem_type: str, confirm: bool = False) -> dict[str, Any]:
+    """Apply the suggested fix for ONE named workload issue — scoped to that
+    single resource, never a bulk operation.
+
+    The issue is re-detected live before anything runs, so a problem that has
+    already resolved itself cannot be "fixed" against stale findings. Purely
+    diagnostic commands are refused rather than counted as a remediation, and
+    the command still passes through the destructive-command guard in
+    kubectl.apply_fix.
+
+    kind: deployment | statefulset | daemonset | job | cronjob.
+    name: exact workload name.
+    namespace: Kubernetes namespace.
+    problem_type: which detected issue to act on, e.g. "ScaledZero".
+    confirm: must be explicitly True, or nothing is applied — the proposed fix
+        is returned instead so the caller can review it first.
+    """
+    def _run():
+        from agent.core.models import WorkloadIssue
+        from agent.skills.workloads import WorkloadsSkill
+
+        skill = WorkloadsSkill()
+        detail = skill.diagnose(kind, name, namespace)
+        if not detail.get("found"):
+            return {"applied": False, "message": detail.get("message", "Workload not found.")}
+
+        issues = [WorkloadIssue(**i) for i in detail.get("issues", [])]
+        match = next((i for i in issues if i.problem_type.value == problem_type), None)
+        if match is None:
+            available = [i.problem_type.value for i in issues]
+            return {"applied": False,
+                    "message": (f"No current issue of type {problem_type!r} on "
+                                f"{namespace}/{name}. Detected now: {available or 'none'}."),
+                    "detected": available}
+
+        result = skill.apply_fix(match, confirmed=confirm)
+        result["issue"] = match.model_dump()
+        return result
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def path_trace(url: str, namespace: str = "") -> dict[str, Any]:
+    """Trace one URL hop by hop from the public internet to the pod, and name
+    the weakest hop. Read-only.
+
+    Walks nine hops in order: DNS, TLS, HTTP, AWS load balancer, Ingress rule,
+    ingress controller, Service, Endpoints, workload. Hops 1-3 are REAL probes
+    from the machine running this server (a DNS lookup, a TLS handshake and an
+    HTTP GET) — so unlike a config check, this distinguishes "configured
+    correctly" from "actually working".
+
+    The weakest hop is the FIRST failure along the path, never the worst
+    -sounding one, because an upstream failure explains every symptom
+    downstream of it.
+
+    Use this instead of guessing which subsystem to check when someone reports
+    a site or API is down.
+
+    url: full URL or bare hostname, e.g. "www.example.com" or "https://api.example.com/health".
+    namespace: optional Kubernetes namespace hint; inferred from the matching
+        Ingress when omitted.
+    """
+    def _run():
+        from agent.skills.request_path import RequestPathSkill
+        return RequestPathSkill().trace(url, namespace).model_dump()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def incident_postmortem(incident_id: str) -> dict[str, Any]:
+    """Compile a written postmortem for an incident: a chronological timeline
+    merged from the incident tracker and whatever other skills (change
+    correlation, workload scans, metrics, request-path traces, pod/Jenkins
+    diagnoses) recorded during its window, plus a narrative summary, root
+    cause, impact and ranked action items. Read-only — writes nothing back to
+    the incident.
+
+    Adds no new evidence of its own; it only compiles what other tools already
+    diagnosed. If nothing else diagnosed this incident, `degraded=true` says
+    so rather than inventing a root cause. The response includes a rendered
+    `markdown` field ready to paste into a wiki.
+
+    incident_id: full or short (8-char) incident id from incident_correlate
+        or the incident tracker.
+    """
+    def _run():
+        from agent.integrations import incident_db
+        from agent.skills.postmortem import PostmortemSkill
+
+        resolved_id = incident_id
+        if incident_db.get_incident(incident_id) is None and len(incident_id) <= 8:
+            for cand in incident_db.list_incidents(limit=200):
+                if cand["id"].startswith(incident_id):
+                    resolved_id = cand["id"]
+                    break
+        return PostmortemSkill().generate(resolved_id).model_dump()
     return await asyncio.to_thread(_run)
 
 
