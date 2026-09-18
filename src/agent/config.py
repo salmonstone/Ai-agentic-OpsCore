@@ -88,6 +88,28 @@ class Settings(BaseSettings):
     jenkins_auto_heal:      bool = False   # true = auto-fix safe, known patterns
     jenkins_scan_interval:  int  = 5       # minutes between scans in `agent jenkins watch`
 
+
+    # Prometheus / Thanos / Mimir — the agent's time-series source.
+    # Unset is a supported state: every metrics capability degrades to a
+    # single kubectl-top reading and says so, rather than failing.
+    prometheus_url:        str  = ""    # e.g. http://prometheus.monitoring:9090
+    prometheus_token:      str  = ""    # bearer token, if the endpoint needs one
+    prometheus_user:       str  = ""    # basic auth alternative
+    prometheus_password:   str  = ""
+    prometheus_verify_ssl: bool = True
+    prometheus_timeout:    int  = 20
+
+    # Metric anomaly thresholds (skills/metrics.py)
+    metric_spike_sigma:       float = 3.0   # stdevs above baseline to call a spike
+    metric_saturation_warn:   float = 0.80  # fraction of limit
+    metric_saturation_crit:   float = 0.90
+    metric_trend_min_growth:  float = 0.25  # +25% across the window to call a trend
+    metric_trend_min_r2:      float = 0.75  # how straight that growth must be
+
+    # Change correlation (skills/change.py)
+    git_repo_path:          str = ""       # defaults to cwd
+    change_window_minutes:  int = 60
+
     def get_aws_session(self):
         """
         Build a boto3.Session for the configured aws_auth_method.

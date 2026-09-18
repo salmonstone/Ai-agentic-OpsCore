@@ -1220,3 +1220,381 @@ class JenkinsPattern(BaseModel):
     likely_cause:   str = ""
     recommendation: str = ""
     affected_jobs:  list[str] = Field(default_factory=list)
+
+
+# ===========================================================================
+# Tier 1 — Metrics / time-series
+#
+# The only pre-existing metric source was `kubectl top`, which is a single
+# instantaneous reading. Anything needing a trend (leak detection, anomaly
+# baselines, RED/USE rates, recovery verification) needs a series — which is
+# what these shapes carry.
+# ===========================================================================
+
+class MetricSource(str, Enum):
+    PROMETHEUS  = "prometheus"
+    CLOUDWATCH  = "cloudwatch"
+    KUBECTL_TOP = "kubectl-top"     # degraded: one point, no history
+    NONE        = "none"
+
+
+class MetricPoint(BaseModel):
+    ts:    float       # unix seconds
+    value: float
+
+
+class MetricSeries(BaseModel):
+    name:   str
+    labels: dict[str, str]     = Field(default_factory=dict)
+    points: list[MetricPoint]  = Field(default_factory=list)
+    unit:   str                = ""
+    source: MetricSource       = MetricSource.NONE
+
+    def values(self) -> list[float]:
+        return [p.value for p in self.points]
+
+    def latest(self) -> float | None:
+        return self.points[-1].value if self.points else None
+
+    def earliest(self) -> float | None:
+        return self.points[0].value if self.points else None
+
+    def span_seconds(self) -> float:
+        if len(self.points) < 2:
+            return 0.0
+        return self.points[-1].ts - self.points[0].ts
+
+
+class AnomalyKind(str, Enum):
+    SPIKE      = "Spike"          # far above its own baseline
+    DROP       = "Drop"           # far below baseline (traffic loss)
+    TREND_UP   = "TrendUp"        # sustained monotonic growth — leak shape
+    SATURATION = "Saturation"     # near a hard limit (cpu/mem/disk/conns)
+    FLATLINE   = "Flatline"       # zero variance at zero — dead scrape target
+    NONE       = "None"
+
+
+class MetricAnomaly(BaseModel):
+    kind:        AnomalyKind
+    severity:    str                        # critical | warning | info
+    metric:      str
+    labels:      dict[str, str] = Field(default_factory=dict)
+    description: str
+    baseline:    float | None = None
+    current:     float | None = None
+    change_pct:  float | None = None
+    evidence:    list[str]    = Field(default_factory=list)
+
+
+class GoldenSignals(BaseModel):
+    """RED (rate/errors/duration) + USE saturation, for one target."""
+    target:         str
+    rate_per_sec:   float | None = None
+    error_ratio:    float | None = None   # 0.0 - 1.0
+    latency_p50:    float | None = None   # seconds
+    latency_p95:    float | None = None
+    latency_p99:    float | None = None
+    cpu_saturation: float | None = None   # 0.0 - 1.0 of limit
+    mem_saturation: float | None = None
+    restart_rate:   float | None = None
+
+
+class MetricsReport(BaseModel):
+    target:          str
+    namespace:       str          = ""
+    window_minutes:  int          = 60
+    source:          MetricSource = MetricSource.NONE
+    degraded:        bool         = False   # True when only kubectl-top was available
+    degraded_reason: str          = ""
+    signals:         GoldenSignals | None = None
+    anomalies:       list[MetricAnomaly]  = Field(default_factory=list)
+    series_count:    int          = 0
+    analysis:        str          = ""
+    generated_at:    str          = ""
+
+
+# ===========================================================================
+# Tier 1 — Service topology / blast radius
+# ===========================================================================
+
+class TopologyNodeKind(str, Enum):
+    INGRESS  = "ingress"
+    SERVICE  = "service"
+    WORKLOAD = "workload"
+    EXTERNAL = "external"
+
+
+class TopologyEdgeKind(str, Enum):
+    ROUTES  = "routes"      # ingress -> service
+    SELECTS = "selects"     # service -> workload (via label selector)
+    CALLS   = "calls"       # workload -> service (env/config reference)
+    ALLOWS  = "allows"      # NetworkPolicy-derived permission
+
+
+class TopologyNode(BaseModel):
+    id:        str                       # "<kind>/<namespace>/<name>"
+    kind:      TopologyNodeKind
+    name:      str
+    namespace: str  = ""
+    detail:    str  = ""
+    healthy:   bool = True
+    replicas:  str  = ""                 # "2/3" for workloads
+
+
+class TopologyEdge(BaseModel):
+    source: str
+    target: str
+    kind:   TopologyEdgeKind
+    detail: str = ""
+
+
+class TopologyGraph(BaseModel):
+    namespace:    str
+    nodes:        list[TopologyNode] = Field(default_factory=list)
+    edges:        list[TopologyEdge] = Field(default_factory=list)
+    generated_at: str                = ""
+    warnings:     list[str]          = Field(default_factory=list)
+
+    def node(self, node_id: str) -> TopologyNode | None:
+        return next((n for n in self.nodes if n.id == node_id), None)
+
+    def out_edges(self, node_id: str) -> list[TopologyEdge]:
+        return [e for e in self.edges if e.source == node_id]
+
+    def in_edges(self, node_id: str) -> list[TopologyEdge]:
+        return [e for e in self.edges if e.target == node_id]
+
+
+class BlastRadius(BaseModel):
+    target:        str
+    target_kind:   str       = ""
+    direct:        list[str] = Field(default_factory=list)
+    transitive:    list[str] = Field(default_factory=list)
+    ingress_paths: list[str] = Field(default_factory=list)
+    severity:      str       = "info"     # critical | warning | info
+    user_facing:   bool      = False
+    explanation:   str       = ""
+
+
+# ===========================================================================
+# Tier 1 — Change correlation
+# ===========================================================================
+
+class ChangeKind(str, Enum):
+    ROLLOUT       = "Rollout"         # k8s workload revision bumped
+    SCALE         = "Scale"           # replica count changed
+    IMAGE         = "Image"           # container image changed
+    DEPLOY_RECORD = "DeployRecord"    # our own deploy_db entry
+    DAEMON_ACTION = "DaemonAction"    # autonomous healer action
+    CI_BUILD      = "CiBuild"         # Jenkins build
+    COMMIT        = "Commit"          # git commit
+    CLUSTER_EVENT = "ClusterEvent"    # notable kube event
+    INCIDENT      = "Incident"        # a previously opened incident
+
+
+class ChangeEvent(BaseModel):
+    kind:      ChangeKind
+    at:        str                  # ISO8601
+    ts:        float                # unix seconds, for arithmetic
+    source:    str                  # which integration produced it
+    resource:  str = ""
+    namespace: str = ""
+    summary:   str = ""
+    detail:    str = ""
+    git_sha:   str = ""
+    image:     str = ""
+    author:    str = ""
+
+
+class ChangeCorrelation(BaseModel):
+    event:          ChangeEvent
+    score:          int                    # 0-100, computed deterministically
+    reasons:        list[str] = Field(default_factory=list)
+    seconds_before: float = 0.0
+
+
+class ChangeReport(BaseModel):
+    symptom:        str
+    symptom_at:     str
+    window_minutes: int = 60
+    events_found:   int = 0
+    correlated:     list[ChangeCorrelation]  = Field(default_factory=list)
+    prime_suspect:  ChangeCorrelation | None = None
+    confidence:     str = "low"       # high | medium | low
+    analysis:       str = ""
+    generated_at:   str = ""
+
+
+# ===========================================================================
+# Tier 1 — Workload controllers & scheduling
+# ===========================================================================
+
+class WorkloadKind(str, Enum):
+    DEPLOYMENT  = "Deployment"
+    STATEFULSET = "StatefulSet"
+    DAEMONSET   = "DaemonSet"
+    JOB         = "Job"
+    CRONJOB     = "CronJob"
+
+
+class WorkloadProblemType(str, Enum):
+    REPLICAS_UNAVAILABLE    = "ReplicasUnavailable"
+    ROLLOUT_STUCK           = "RolloutStuck"
+    SCALED_ZERO             = "ScaledZero"
+    UNSCHEDULABLE           = "Unschedulable"
+    PDB_BLOCKING            = "PdbBlocking"
+    CRONJOB_SUSPENDED       = "CronJobSuspended"
+    CRONJOB_NOT_FIRING      = "CronJobNotFiring"
+    JOB_BACKOFF_EXCEEDED    = "JobBackoffExceeded"
+    JOB_STUCK               = "JobStuck"
+    DAEMONSET_NOT_SCHEDULED = "DaemonSetNotScheduled"
+    HEALTHY                 = "Healthy"
+    UNKNOWN                 = "Unknown"
+
+
+class WorkloadInfo(BaseModel):
+    kind:      WorkloadKind
+    name:      str
+    namespace: str
+    desired:   int = 0
+    ready:     int = 0
+    updated:   int = 0
+    available: int = 0
+    age:       str = ""
+    images:    list[str] = Field(default_factory=list)
+    # CronJob-specific
+    schedule:           str  = ""
+    suspended:          bool = False
+    last_schedule_time: str  = ""
+    active:             int  = 0
+    # Job-specific
+    succeeded:     int = 0
+    failed:        int = 0
+    backoff_limit: int = 6
+
+
+class WorkloadIssue(BaseModel):
+    severity:     str                      # critical | warning | info
+    problem_type: WorkloadProblemType
+    kind:         WorkloadKind
+    name:         str
+    namespace:    str
+    description:  str
+    evidence:     list[str]  = Field(default_factory=list)
+    fix:          str        = ""
+    fix_command:  str | None = None
+    auto_fixable: bool       = False
+
+
+class WorkloadReport(BaseModel):
+    namespace:       str
+    total_workloads: int = 0
+    by_kind:         dict[str, int]      = Field(default_factory=dict)
+    issues:          list[WorkloadIssue] = Field(default_factory=list)
+    analysis:        str = ""
+    generated_at:    str = ""
+
+
+# ===========================================================================
+# Tier 2 — request-path tracing
+#
+# One ordered walk from the public internet to the application, so the answer
+# to "the site is down" is a hop number rather than a list of things to check.
+# ===========================================================================
+
+class HopStatus(str, Enum):
+    OK      = "ok"
+    WARN    = "warn"
+    FAIL    = "fail"
+    SKIP    = "skip"        # not applicable to this request (e.g. TLS on http://)
+    UNKNOWN = "unknown"     # could not be determined — never conflated with OK
+
+
+class RequestHop(BaseModel):
+    index:       int
+    name:        str                    # "DNS", "TLS", "Service", ...
+    layer:       str                    # internet | aws | cluster | app
+    status:      HopStatus
+    summary:     str
+    latency_ms:  float | None = None
+    evidence:    list[str]    = Field(default_factory=list)
+    fix:         str          = ""
+    fix_command: str | None   = None
+
+
+class RequestPathReport(BaseModel):
+    url:              str
+    host:             str
+    namespace:        str  = ""
+    hops:             list[RequestHop] = Field(default_factory=list)
+    weakest:          RequestHop | None = None
+    verdict:          str  = ""
+    reachable:        bool = False
+    http_status:      int | None = None
+    total_latency_ms: float | None = None
+    analysis:         str  = ""
+    notes:            list[str] = Field(default_factory=list)
+    generated_at:     str  = ""
+
+
+# ===========================================================================
+# Postmortem
+#
+# Assembles a written incident report from data every other skill already
+# produced — incident_db's timeline, and whatever change/topology/metrics/
+# request-path/k8s/jenkins recorded to memory during the incident window.
+# Adds no new evidence of its own; it is purely a compiler over what already
+# exists, which is why it is cheap to build and safe to trust.
+# ===========================================================================
+
+class TimelineEntryKind(str, Enum):
+    INCIDENT   = "incident"       # open/resolve/escalate from incident_db
+    DIAGNOSIS  = "diagnosis"      # a skill's remember() call during the window
+    FIX        = "fix"            # an apply_fix / remediation attempt
+    NOTE       = "note"           # free-text incident_events entry
+
+
+class PostmortemTimelineEntry(BaseModel):
+    at:       str                  # ISO8601
+    ts:       float
+    kind:     TimelineEntryKind
+    source:   str                  # which skill/db produced this
+    summary:  str
+    detail:   str = ""
+
+
+class PostmortemActionItem(BaseModel):
+    title:      str
+    rationale:  str
+    owner_hint: str = ""            # "platform team" / "app team" / "" if unclear
+    priority:   str = "medium"      # high | medium | low
+
+
+class PostmortemReport(BaseModel):
+    incident_id:     str
+    title:           str
+    severity:        str = ""
+    service:         str = ""
+    namespace:       str = ""
+    opened_at:       str = ""
+    resolved_at:     str = ""
+    duration_minutes: float = 0.0
+    status:          str = ""
+    auto_fixed:      bool = False
+    fix_attempts:    int = 0
+
+    timeline:        list[PostmortemTimelineEntry] = Field(default_factory=list)
+    prime_suspect:   str = ""       # carried over from change-correlation, if found
+    evidence_sources: list[str]     = Field(default_factory=list)
+
+    summary:         str = ""       # one paragraph, what happened
+    root_cause:      str = ""
+    impact:          str = ""
+    what_went_well:  str = ""
+    what_went_wrong: str = ""
+    action_items:    list[PostmortemActionItem] = Field(default_factory=list)
+
+    markdown:        str = ""       # rendered, ready to paste into a wiki
+    generated_at:    str = ""
+    degraded:        bool = False
+    degraded_reason: str  = ""
