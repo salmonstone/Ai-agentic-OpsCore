@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from agent.core.models import (
     CertInfo, ClusterOverview, IngressInfo, KubectlResult,
     NamespaceInfo, NodeInfo, PodInfo, ProblemType, TLSSecretInfo,
+    WorkloadInfo, WorkloadKind,
 )
 from agent.core.safety import command_is_dangerous
 from agent.observability.logging import get_logger
@@ -1707,9 +1708,18 @@ def check_ingress_controller() -> dict:
         pods_bad  = []
         for pod in items:
             phase = pod.get("status", {}).get("phase", "Unknown")
-            cs    = pod.get("status", {}).get("containerStatuses", [])
-            ready = all(c.get("ready", False) for c in cs)
             name  = pod["metadata"]["name"]
+
+            # Completed Job pods match the controller's label selector but are
+            # NOT controller replicas — ingress-nginx ships admission-create
+            # and admission-patch Jobs that finish and stay Succeeded forever.
+            # Counting them as "not ready" reported a healthy single-replica
+            # controller as degraded on every scan.
+            if phase in ("Succeeded", "Failed"):
+                continue
+
+            cs    = pod.get("status", {}).get("containerStatuses", [])
+            ready = bool(cs) and all(c.get("ready", False) for c in cs)
             (pods_ok if ready else pods_bad).append(name)
 
         status = "running" if pods_ok and not pods_bad else (
@@ -3007,3 +3017,382 @@ def check_image_exists(image: str) -> bool:
         pass
     # Basic format validation — if it has a colon it's likely real
     return ":" in image or "/" in image
+
+
+# ===========================================================================
+# Tier 1 — topology inputs
+#
+# Everything below is read-only and returns plain, already-normalized shapes.
+# The graph-building judgement (which service selects which workload, what
+# calls what) is reasoning and lives in skills/topology.py, not here.
+# ===========================================================================
+
+def _ns_args(namespace: str) -> list[str]:
+    """`-A` for every namespace, `-n <ns>` otherwise — the shape used by
+    every existing collector in this module."""
+    return ["-A"] if namespace == "all" else ["-n", namespace]
+
+
+def _age_from_iso(ts_str: str) -> str:
+    """Human-readable age from any creationTimestamp-shaped string."""
+    if not ts_str:
+        return "?"
+    try:
+        created = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        secs = int((datetime.now(timezone.utc) - created).total_seconds())
+        if secs < 3600:
+            return f"{secs // 60}m"
+        if secs < 86400:
+            return f"{secs // 3600}h"
+        return f"{secs // 86400}d"
+    except Exception:
+        return "?"
+
+
+def _get_json_items(resource: str, namespace: str) -> list[dict]:
+    """One `kubectl get <resource> -o json`, returning `.items`.
+
+    Returns [] for a CRD that is not installed (cert-manager, PDBs on very
+    old clusters) rather than surfacing an error — a missing resource type
+    is a normal state, not a failure.
+    """
+    result = run_kubectl(["get", resource, *_ns_args(namespace), "-o", "json"])
+    if not result.success or not result.output.strip():
+        log.debug("kubectl.get_items.empty", resource=resource, error=result.error[:120])
+        return []
+    try:
+        return json.loads(result.output).get("items", []) or []
+    except json.JSONDecodeError as e:
+        log.warning("kubectl.get_items.parse_error", resource=resource, error=str(e))
+        return []
+
+
+def get_services_detail(namespace: str = "all") -> list[dict]:
+    """Services with their selector and ports — the left half of every
+    service -> workload edge."""
+    out = []
+    for svc in _get_json_items("services", namespace):
+        meta = svc.get("metadata", {})
+        spec = svc.get("spec", {})
+        ingress_lb = (svc.get("status", {}).get("loadBalancer", {}).get("ingress") or [])
+        out.append({
+            "name":        meta.get("name", "?"),
+            "namespace":   meta.get("namespace", "default"),
+            "type":        spec.get("type", "ClusterIP"),
+            "selector":    spec.get("selector") or {},
+            "cluster_ip":  spec.get("clusterIP", ""),
+            "external_ip": (ingress_lb[0].get("hostname") or ingress_lb[0].get("ip", "")
+                            if ingress_lb else ""),
+            "ports":       [f"{p.get('port')}/{p.get('protocol', 'TCP')}"
+                            for p in spec.get("ports", []) or []],
+            "age":         _age_from_iso(meta.get("creationTimestamp", "")),
+        })
+    return out
+
+
+def get_endpoints(namespace: str = "all") -> list[dict]:
+    """Endpoint readiness per Service.
+
+    `ready` of 0 on a Service that has a selector is the single most common
+    cause of a 503 behind a healthy-looking Ingress, and it is invisible from
+    the pod list alone.
+    """
+    out = []
+    for ep in _get_json_items("endpoints", namespace):
+        meta = ep.get("metadata", {})
+        ready, not_ready, pods = 0, 0, []
+        for subset in ep.get("subsets", []) or []:
+            for addr in subset.get("addresses", []) or []:
+                ready += 1
+                target = addr.get("targetRef") or {}
+                if target.get("name"):
+                    pods.append(target["name"])
+            not_ready += len(subset.get("notReadyAddresses", []) or [])
+        out.append({
+            "name":      meta.get("name", "?"),
+            "namespace": meta.get("namespace", "default"),
+            "ready":     ready,
+            "not_ready": not_ready,
+            "pods":      pods,
+        })
+    return out
+
+
+def get_pod_labels(namespace: str = "all") -> list[dict]:
+    """Pod labels plus owner reference.
+
+    Deliberately separate from get_pods(): that returns PodInfo for
+    diagnosis, this returns the label/owner metadata the topology builder
+    needs to map Service selectors onto controllers. Keeping them apart
+    avoids widening PodInfo for a use case only one skill has.
+    """
+    out = []
+    for pod in _get_json_items("pods", namespace):
+        meta = pod.get("metadata", {})
+        owners = meta.get("ownerReferences") or []
+        owner_kind = owners[0].get("kind", "") if owners else ""
+        owner_name = owners[0].get("name", "") if owners else ""
+
+        # A ReplicaSet is an implementation detail of its Deployment; the
+        # name is "<deployment>-<pod-template-hash>", so dropping the last
+        # segment recovers the controller a human actually names.
+        if owner_kind == "ReplicaSet" and "-" in owner_name:
+            owner_kind, owner_name = "Deployment", owner_name.rsplit("-", 1)[0]
+
+        out.append({
+            "name":       meta.get("name", "?"),
+            "namespace":  meta.get("namespace", "default"),
+            "labels":     meta.get("labels") or {},
+            "owner_kind": owner_kind,
+            "owner_name": owner_name,
+            "node":       pod.get("spec", {}).get("nodeName") or "",
+            "status":     pod.get("status", {}).get("phase", ""),
+        })
+    return out
+
+
+def get_network_policies(namespace: str = "all") -> list[dict]:
+    """NetworkPolicies, flattened to who-they-select and which directions
+    they constrain."""
+    out = []
+    for np in _get_json_items("networkpolicies", namespace):
+        meta = np.get("metadata", {})
+        spec = np.get("spec", {})
+        out.append({
+            "name":          meta.get("name", "?"),
+            "namespace":     meta.get("namespace", "default"),
+            "pod_selector":  (spec.get("podSelector") or {}).get("matchLabels") or {},
+            "policy_types":  spec.get("policyTypes", []) or [],
+            "ingress_rules": len(spec.get("ingress", []) or []),
+            "egress_rules":  len(spec.get("egress", []) or []),
+        })
+    return out
+
+
+def get_workload_service_refs(namespace: str = "all") -> list[dict]:
+    """Service names referenced from a workload's container env vars.
+
+    This is how workload -> service ("calls") edges are discovered without a
+    service mesh or tracing backend. It is a heuristic and is labelled as one
+    everywhere it surfaces: an app that builds its URLs from a ConfigMap at
+    runtime will not appear here, and a stale env var pointing at a retired
+    service will. It finds the common case — DATABASE_URL, REDIS_HOST,
+    *_SERVICE_HOST — at zero cost.
+    """
+    out = []
+    for kind in ("deployments", "statefulsets"):
+        for item in _get_json_items(kind, namespace):
+            meta = item.get("metadata", {})
+            containers = (item.get("spec", {}).get("template", {})
+                              .get("spec", {}).get("containers", []) or [])
+            refs: list[str] = []
+            for c in containers:
+                for env in c.get("env", []) or []:
+                    value = env.get("value")
+                    if not value or not isinstance(value, str):
+                        continue    # valueFrom (secret/configmap) is not readable here
+                    refs.append(value)
+            out.append({
+                "kind":      "Deployment" if kind == "deployments" else "StatefulSet",
+                "name":      meta.get("name", "?"),
+                "namespace": meta.get("namespace", "default"),
+                "env_values": refs,
+            })
+    return out
+
+
+# ===========================================================================
+# Tier 1 — workload controllers & scheduling
+# ===========================================================================
+
+def _workload_images(item: dict) -> list[str]:
+    containers = (item.get("spec", {}).get("template", {})
+                      .get("spec", {}).get("containers", []) or [])
+    return [c.get("image", "") for c in containers if c.get("image")]
+
+
+def get_workloads(kind: str, namespace: str = "all") -> list[WorkloadInfo]:
+    """Controller-level state for one workload kind.
+
+    kind: deployment | statefulset | daemonset | job | cronjob
+
+    Existing coverage in this repo is pod-centric — it can tell you a pod is
+    CrashLooping but not that a Deployment has been stuck at 2/5 available
+    for an hour, that a DaemonSet is missing from three nodes, or that a
+    CronJob silently stopped firing. Those are controller-level facts and
+    need controller-level reads.
+    """
+    plural = {
+        "deployment": "deployments", "statefulset": "statefulsets",
+        "daemonset": "daemonsets", "job": "jobs", "cronjob": "cronjobs",
+    }.get(kind.lower().rstrip("s"), kind)
+
+    enum_kind = {
+        "deployments": WorkloadKind.DEPLOYMENT, "statefulsets": WorkloadKind.STATEFULSET,
+        "daemonsets": WorkloadKind.DAEMONSET, "jobs": WorkloadKind.JOB,
+        "cronjobs": WorkloadKind.CRONJOB,
+    }.get(plural)
+    if enum_kind is None:
+        log.warning("kubectl.get_workloads.bad_kind", kind=kind)
+        return []
+
+    out: list[WorkloadInfo] = []
+    for item in _get_json_items(plural, namespace):
+        meta = item.get("metadata", {})
+        spec = item.get("spec", {})
+        status = item.get("status", {})
+        common = {
+            "kind":      enum_kind,
+            "name":      meta.get("name", "?"),
+            "namespace": meta.get("namespace", "default"),
+            "age":       _age_from_iso(meta.get("creationTimestamp", "")),
+            "images":    _workload_images(item),
+        }
+
+        if enum_kind in (WorkloadKind.DEPLOYMENT, WorkloadKind.STATEFULSET):
+            out.append(WorkloadInfo(
+                **common,
+                desired=int(spec.get("replicas", 0) or 0),
+                ready=int(status.get("readyReplicas", 0) or 0),
+                updated=int(status.get("updatedReplicas", 0) or 0),
+                available=int(status.get("availableReplicas", 0) or 0),
+            ))
+        elif enum_kind == WorkloadKind.DAEMONSET:
+            # A DaemonSet's "desired" is how many nodes it should cover, not
+            # a replica count a human chose — same field, different meaning.
+            out.append(WorkloadInfo(
+                **common,
+                desired=int(status.get("desiredNumberScheduled", 0) or 0),
+                ready=int(status.get("numberReady", 0) or 0),
+                updated=int(status.get("updatedNumberScheduled", 0) or 0),
+                available=int(status.get("numberAvailable", 0) or 0),
+            ))
+        elif enum_kind == WorkloadKind.JOB:
+            out.append(WorkloadInfo(
+                **common,
+                desired=int(spec.get("completions", 1) or 1),
+                succeeded=int(status.get("succeeded", 0) or 0),
+                failed=int(status.get("failed", 0) or 0),
+                active=int(status.get("active", 0) or 0),
+                backoff_limit=int(spec.get("backoffLimit", 6) or 6),
+            ))
+        else:   # CronJob
+            images = _workload_images(
+                {"spec": {"template": spec.get("jobTemplate", {}).get("spec", {}).get("template", {})}}
+            )
+            out.append(WorkloadInfo(
+                **{**common, "images": images or common["images"]},
+                schedule=spec.get("schedule", ""),
+                suspended=bool(spec.get("suspend", False)),
+                last_schedule_time=status.get("lastScheduleTime", "") or "",
+                active=len(status.get("active", []) or []),
+            ))
+    return out
+
+
+def get_workload_conditions(kind: str, name: str, namespace: str) -> list[dict]:
+    """status.conditions for one workload — where Kubernetes records WHY a
+    rollout is stuck (ProgressDeadlineExceeded, ReplicaFailure and their
+    messages) instead of merely that it is."""
+    result = run_kubectl(["get", kind, name, "-n", namespace, "-o", "json"])
+    if not result.success or not result.output.strip():
+        return []
+    try:
+        item = json.loads(result.output)
+    except json.JSONDecodeError:
+        return []
+    return [
+        {
+            "type":    c.get("type", ""),
+            "status":  c.get("status", ""),
+            "reason":  c.get("reason", ""),
+            "message": (c.get("message") or "")[:300],
+            "updated": c.get("lastUpdateTime", "") or c.get("lastTransitionTime", ""),
+        }
+        for c in (item.get("status", {}).get("conditions") or [])
+    ]
+
+
+def get_pdbs(namespace: str = "all") -> list[dict]:
+    """PodDisruptionBudgets with their current allowance.
+
+    `disruptions_allowed == 0` is what actually blocks a node drain during a
+    cluster upgrade — the operation just hangs, with the reason sitting in an
+    object nobody thinks to look at.
+    """
+    out = []
+    for pdb in _get_json_items("poddisruptionbudgets", namespace):
+        meta = pdb.get("metadata", {})
+        spec = pdb.get("spec", {})
+        status = pdb.get("status", {})
+        out.append({
+            "name":                meta.get("name", "?"),
+            "namespace":           meta.get("namespace", "default"),
+            "min_available":       str(spec.get("minAvailable", "")),
+            "max_unavailable":     str(spec.get("maxUnavailable", "")),
+            "current_healthy":     int(status.get("currentHealthy", 0) or 0),
+            "desired_healthy":     int(status.get("desiredHealthy", 0) or 0),
+            "expected_pods":       int(status.get("expectedPods", 0) or 0),
+            "disruptions_allowed": int(status.get("disruptionsAllowed", 0) or 0),
+            "selector":            (spec.get("selector") or {}).get("matchLabels") or {},
+        })
+    return out
+
+
+def get_unschedulable_pods(namespace: str = "all") -> list[dict]:
+    """Pending pods together with the scheduler's own explanation.
+
+    The message on the PodScheduled=False condition is the actual answer
+    ("0/4 nodes are available: 3 Insufficient cpu, 1 node(s) had taint...")
+    and is far more precise than anything an LLM can infer from the pod list.
+    """
+    out = []
+    for pod in _get_json_items("pods", namespace):
+        if pod.get("status", {}).get("phase") != "Pending":
+            continue
+        meta = pod.get("metadata", {})
+        reason, message = "", ""
+        for c in pod.get("status", {}).get("conditions", []) or []:
+            if c.get("type") == "PodScheduled" and c.get("status") == "False":
+                reason = c.get("reason", "")
+                message = (c.get("message") or "")[:400]
+        if not reason and not message:
+            continue    # Pending but scheduled — it is pulling an image, not unschedulable
+        out.append({
+            "name":      meta.get("name", "?"),
+            "namespace": meta.get("namespace", "default"),
+            "age":       _age_from_iso(meta.get("creationTimestamp", "")),
+            "reason":    reason,
+            "message":   message,
+        })
+    return out
+
+
+def get_workload_rollout_times(namespace: str = "all") -> list[dict]:
+    """When each Deployment/StatefulSet last changed revision.
+
+    This is the cheapest possible "what shipped recently" signal: it needs no
+    CI integration, no deploy webhook and no git access, because Kubernetes
+    already records it on the Progressing condition.
+    """
+    out = []
+    for kind, plural in (("Deployment", "deployments"), ("StatefulSet", "statefulsets")):
+        for item in _get_json_items(plural, namespace):
+            meta = item.get("metadata", {})
+            annotations = meta.get("annotations") or {}
+            updated = ""
+            for c in item.get("status", {}).get("conditions", []) or []:
+                if c.get("type") == "Progressing":
+                    updated = c.get("lastUpdateTime", "") or ""
+            if not updated:
+                continue
+            out.append({
+                "kind":         kind,
+                "name":         meta.get("name", "?"),
+                "namespace":    meta.get("namespace", "default"),
+                "revision":     annotations.get("deployment.kubernetes.io/revision", ""),
+                "change_cause": annotations.get("kubernetes.io/change-cause", ""),
+                "updated_at":   updated,
+                "images":       _workload_images(item),
+            })
+    return out
