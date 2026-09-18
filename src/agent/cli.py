@@ -110,6 +110,36 @@ k8s_app = typer.Typer(
 )
 app.add_typer(k8s_app, name="k8s")
 
+path_app = typer.Typer(
+    help="Trace a request hop by hop from the internet to the pod.",
+    no_args_is_help=True,
+)
+app.add_typer(path_app, name="path")
+
+metrics_app = typer.Typer(
+    help="Time-series analysis — golden signals, anomalies, recovery verification.",
+    no_args_is_help=True,
+)
+app.add_typer(metrics_app, name="metrics")
+
+change_app = typer.Typer(
+    help="Change correlation — what changed just before this broke?",
+    no_args_is_help=True,
+)
+app.add_typer(change_app, name="change")
+
+topology_app = typer.Typer(
+    help="Service dependency graph and blast-radius analysis.",
+    no_args_is_help=True,
+)
+app.add_typer(topology_app, name="topology")
+
+workloads_app = typer.Typer(
+    help="Controller-level diagnosis — Deployments, StatefulSets, DaemonSets, Jobs, CronJobs.",
+    no_args_is_help=True,
+)
+app.add_typer(workloads_app, name="workloads")
+
 # Commands that work without a live cluster (kubeconfig / local DB only).
 _K8S_NO_CLUSTER_CMDS = {"contexts", "switch", "add-cluster", "history"}
 
@@ -13790,3 +13820,625 @@ def events_enqueue(
 
 def main() -> None:
     app()
+
+
+# ===========================================================================
+# Tier 1 — metrics / change / topology / workloads
+#
+# Same skill objects the MCP tools call. Nothing here contains business
+# logic; every command instantiates a skill, calls one method, and renders
+# the typed result.
+# ===========================================================================
+
+_T1_SEV_COLOR = {"critical": "bold red", "warning": "yellow", "info": "dim"}
+
+
+def _t1_sev(severity: str) -> str:
+    return _T1_SEV_COLOR.get(severity, "white")
+
+
+@metrics_app.command("status")
+def metrics_status_cmd() -> None:
+    """Show which time-series backends are reachable."""
+    try:
+        from agent.skills.metrics import MetricsSkill
+
+        console.print()
+        console.print(Rule("[bold cyan]Metrics — Backend Status[/bold cyan]"))
+        status = MetricsSkill().status()
+
+        t = Table(show_header=False, box=None, padding=(0, 2))
+        t.add_column("k", style="dim", width=18)
+        t.add_column("v")
+        prom = status["prometheus"]
+        cw = status["cloudwatch"]
+        t.add_row("Prometheus", ("[green]connected[/green] " + prom.get("url", ""))
+                  if prom.get("connected") else f"[red]no[/red] — {prom.get('error', '')}")
+        t.add_row("CloudWatch", "[green]connected[/green]" if cw.get("connected")
+                  else f"[red]no[/red] — {cw.get('error', '')}")
+        t.add_row("Effective source", status["effective_source"])
+        console.print()
+        console.print(t)
+        if status.get("note"):
+            console.print()
+            console.print(Panel(status["note"], border_style="yellow", title="Degraded"))
+        console.print()
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@metrics_app.command("analyze")
+def metrics_analyze_cmd(
+    target: str = typer.Argument(".*", help="Pod-name regex, e.g. 'checkout-api.*'."),
+    namespace: str = typer.Option("default", "--namespace", "-n", show_default=True),
+    minutes: int = typer.Option(60, "--minutes", "-m", help="Window to analyse."),
+) -> None:
+    """Golden signals plus saturation / spike / drop / leak / flatline detection."""
+    try:
+        from agent.observability.costs import get_session_total
+        from agent.skills.metrics import MetricsSkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Metrics — {namespace}/{target}[/bold cyan]"))
+        report = MetricsSkill().analyze(target, namespace, minutes)
+
+        if report.degraded:
+            console.print()
+            console.print(Panel(report.degraded_reason, border_style="yellow",
+                                title="[bold]Degraded[/bold]"))
+
+        if report.signals:
+            s = report.signals
+            t = Table(title="Golden signals", box=None, padding=(0, 2))
+            t.add_column("Signal", style="dim")
+            t.add_column("Value", justify="right")
+            for label, value, suffix in (
+                ("Request rate", s.rate_per_sec, " req/s"),
+                ("Error ratio", s.error_ratio, ""),
+                ("Latency p95", s.latency_p95, " s"),
+                ("Latency p99", s.latency_p99, " s"),
+                ("CPU saturation", s.cpu_saturation, ""),
+                ("Memory saturation", s.mem_saturation, ""),
+                ("Restarts/hour", s.restart_rate, ""),
+            ):
+                t.add_row(label, "—" if value is None else f"{value:.4g}{suffix}")
+            console.print()
+            console.print(t)
+
+        if report.anomalies:
+            t = Table(title=f"{len(report.anomalies)} anomalies", box=None, padding=(0, 2))
+            t.add_column("Sev", width=9)
+            t.add_column("Kind", style="cyan", width=11)
+            t.add_column("Metric", style="dim", width=22)
+            t.add_column("Detail", overflow="ellipsis", no_wrap=True)
+            for a in report.anomalies:
+                t.add_row(f"[{_t1_sev(a.severity)}]{a.severity}[/]", a.kind.value,
+                          a.metric[:22], _escape(a.description))
+            console.print()
+            console.print(t)
+        else:
+            console.print()
+            console.print("[green]No anomalies detected.[/green]")
+
+        if report.analysis:
+            console.print()
+            console.print(Panel(_escape(report.analysis), border_style="cyan",
+                                title="[bold]Analysis[/bold]"))
+        console.print()
+        _cost_footer(get_session_total())
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@metrics_app.command("verify")
+def metrics_verify_cmd(
+    target: str = typer.Argument(..., help="Pod-name regex for the thing you fixed."),
+    namespace: str = typer.Option("default", "--namespace", "-n", show_default=True),
+    minutes: int = typer.Option(15, "--minutes", "-m", help="Window to check."),
+) -> None:
+    """Did a remediation actually work? Re-reads the metrics after a fix."""
+    try:
+        from agent.skills.metrics import MetricsSkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Recovery check — {namespace}/{target}[/bold cyan]"))
+        result = MetricsSkill().verify_recovery(target, namespace, minutes)
+
+        colour = {"recovered": "green", "partial": "yellow",
+                  "not_recovered": "red", "unknown": "dim"}.get(result["verdict"], "white")
+        console.print()
+        console.print(Panel(_escape(result["reason"]), border_style=colour,
+                            title=f"[bold]{result['verdict'].upper()}[/bold]"))
+        console.print()
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@change_app.command("timeline")
+def change_timeline_cmd(
+    minutes: int = typer.Option(60, "--minutes", "-m", help="How far back to look."),
+    namespace: str = typer.Option("all", "--namespace", "-n", show_default=True),
+) -> None:
+    """Every infrastructure change in the window, newest first."""
+    try:
+        from agent.skills.change import ChangeSkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Change timeline — last {minutes}m[/bold cyan]"))
+        events = ChangeSkill().collect(minutes, namespace)
+
+        if not events:
+            console.print()
+            console.print("[dim]No changes found. If something broke anyway, look for an "
+                          "external trigger: traffic shift, expiring credential, disk filling, "
+                          "or an upstream dependency.[/dim]")
+            console.print()
+            return
+
+        t = Table(box=None, padding=(0, 2))
+        t.add_column("When", style="dim", width=20)
+        t.add_column("Kind", style="cyan", width=14)
+        t.add_column("Resource", width=22, overflow="ellipsis", no_wrap=True)
+        t.add_column("Summary", overflow="ellipsis", no_wrap=True)
+        for e in events:
+            t.add_row(e.at[:19] or "—", e.kind.value,
+                      f"{e.namespace}/{e.resource}" if e.namespace else e.resource,
+                      _escape(e.summary))
+        console.print()
+        console.print(t)
+        console.print()
+        console.print(f"[dim]{len(events)} changes from "
+                      f"{len({e.source for e in events})} source(s).[/dim]")
+        console.print()
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@change_app.command("correlate")
+def change_correlate_cmd(
+    symptom: str = typer.Argument(..., help="What is wrong, e.g. 'checkout-api 502s in prod'."),
+    at: str = typer.Option("", "--at", help="ISO8601 time the symptom started. Default: now."),
+    minutes: int = typer.Option(60, "--minutes", "-m", help="Window to search."),
+    namespace: str = typer.Option("all", "--namespace", "-n", show_default=True),
+) -> None:
+    """Rank recent changes against a symptom and name a prime suspect."""
+    try:
+        from agent.observability.costs import get_session_total
+        from agent.skills.change import ChangeSkill
+
+        console.print()
+        console.print(Rule("[bold cyan]Change correlation[/bold cyan]"))
+        report = ChangeSkill().correlate(symptom, at or None, minutes, namespace)
+
+        if report.correlated:
+            t = Table(box=None, padding=(0, 2))
+            t.add_column("Score", justify="right", width=6)
+            t.add_column("Before", justify="right", width=10)
+            t.add_column("Kind", style="cyan", width=14)
+            t.add_column("Resource", width=24)
+            t.add_column("Summary", overflow="ellipsis", no_wrap=True)
+            for c in report.correlated[:12]:
+                colour = ("bold red" if c.score >= 70
+                          else "yellow" if c.score >= 50 else "dim")
+                t.add_row(f"[{colour}]{c.score}[/]",
+                          f"{c.seconds_before / 60:.1f}m", c.event.kind.value,
+                          f"{c.event.namespace}/{c.event.resource}"
+                          if c.event.namespace else c.event.resource,
+                          _escape(c.event.summary))
+            console.print()
+            console.print(t)
+
+        conf_colour = {"high": "green", "medium": "yellow", "low": "dim"}.get(
+            report.confidence, "white")
+        console.print()
+        console.print(f"Confidence: [{conf_colour}]{report.confidence}[/] "
+                      f"[dim]({report.events_found} changes examined)[/dim]")
+
+        if report.analysis:
+            console.print()
+            console.print(Panel(_escape(report.analysis), border_style="cyan",
+                                title="[bold]Analysis[/bold]"))
+        console.print()
+        _cost_footer(get_session_total())
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@topology_app.command("graph")
+def topology_graph_cmd(
+    namespace: str = typer.Option("all", "--namespace", "-n", show_default=True),
+) -> None:
+    """Build and print the service dependency graph."""
+    try:
+        from agent.skills.topology import TopologySkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Topology — {namespace}[/bold cyan]"))
+        graph = TopologySkill().build(namespace)
+
+        t = Table(box=None, padding=(0, 2))
+        t.add_column("From", width=38)
+        t.add_column("Edge", style="cyan", width=9)
+        t.add_column("To", width=38)
+        t.add_column("Detail", style="dim", overflow="ellipsis", no_wrap=True)
+        for e in graph.edges:
+            t.add_row(e.source, e.kind.value, e.target, _escape(e.detail[:46]))
+        console.print()
+        console.print(t if graph.edges else "[dim]No edges discovered.[/dim]")
+        console.print()
+        console.print(f"[dim]{len(graph.nodes)} nodes, {len(graph.edges)} edges. "
+                      f"Edges marked (inferred) come from env vars and are a heuristic.[/dim]")
+
+        for w in graph.warnings:
+            console.print(f"[yellow]![/yellow] {_escape(w)}")
+        console.print()
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@topology_app.command("blast")
+def topology_blast_cmd(
+    name: str = typer.Argument(..., help="Resource name."),
+    kind: str = typer.Option("workload", "--kind", "-k",
+                             help="workload | service | ingress."),
+    namespace: str = typer.Option("default", "--namespace", "-n", show_default=True),
+) -> None:
+    """What else breaks if this component degrades?"""
+    try:
+        from agent.observability.costs import get_session_total
+        from agent.skills.topology import TopologySkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Blast radius — {namespace}/{name}[/bold cyan]"))
+        radius = TopologySkill().blast_radius(kind, name, namespace)
+
+        t = Table(show_header=False, box=None, padding=(0, 2))
+        t.add_column("k", style="dim", width=20)
+        t.add_column("v")
+        t.add_row("Severity", f"[{_t1_sev(radius.severity)}]{radius.severity}[/]")
+        t.add_row("User facing", "[bold red]yes[/bold red]" if radius.user_facing else "no")
+        t.add_row("Direct dependents", str(len(radius.direct)))
+        t.add_row("Transitive", str(len(radius.transitive)))
+        if radius.ingress_paths:
+            t.add_row("Ingress paths", ", ".join(radius.ingress_paths[:4]))
+        console.print()
+        console.print(t)
+
+        for label, items in (("Direct", radius.direct), ("Transitive", radius.transitive)):
+            if items:
+                console.print()
+                console.print(f"[bold]{label}[/bold]")
+                for i in items[:15]:
+                    console.print(f"  [dim]-[/dim] {i}")
+
+        if radius.explanation:
+            console.print()
+            console.print(Panel(_escape(radius.explanation), border_style="cyan",
+                                title="[bold]Impact[/bold]"))
+        console.print()
+        _cost_footer(get_session_total())
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@workloads_app.command("scan")
+def workloads_scan_cmd(
+    namespace: str = typer.Option("all", "--namespace", "-n", show_default=True),
+) -> None:
+    """Controller-level scan — replicas, rollouts, Jobs, CronJobs, scheduling, PDBs."""
+    try:
+        from agent.observability.costs import get_session_total
+        from agent.skills.workloads import WorkloadsSkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Workloads — {namespace}[/bold cyan]"))
+        report = WorkloadsSkill().scan(namespace)
+
+        counts = "  ".join(f"{k}={v}" for k, v in report.by_kind.items())
+        console.print()
+        console.print(f"[dim]{report.total_workloads} workloads  ({counts})[/dim]")
+
+        if report.issues:
+            t = Table(box=None, padding=(0, 2))
+            t.add_column("Sev", width=9)
+            t.add_column("Problem", style="cyan", width=24)
+            t.add_column("Resource", width=30)
+            t.add_column("Description", overflow="ellipsis", no_wrap=True)
+            for i in report.issues:
+                t.add_row(f"[{_t1_sev(i.severity)}]{i.severity}[/]", i.problem_type.value,
+                          f"{i.namespace}/{i.name}", _escape(i.description))
+            console.print()
+            console.print(t)
+
+            console.print()
+            console.print("[bold]Suggested commands[/bold]")
+            for i in report.issues[:8]:
+                if i.fix_command:
+                    console.print(f"  [dim]{i.namespace}/{i.name}:[/dim] [cyan]{_escape(i.fix_command)}[/cyan]")
+        else:
+            console.print()
+            console.print("[green]All workloads healthy.[/green]")
+
+        if report.analysis:
+            console.print()
+            console.print(Panel(_escape(report.analysis), border_style="cyan",
+                                title="[bold]Analysis[/bold]"))
+        console.print()
+        _cost_footer(get_session_total())
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@workloads_app.command("diagnose")
+def workloads_diagnose_cmd(
+    kind: str = typer.Argument(..., help="deployment | statefulset | daemonset | job | cronjob."),
+    name: str = typer.Argument(..., help="Workload name."),
+    namespace: str = typer.Option("default", "--namespace", "-n", show_default=True),
+) -> None:
+    """Deep dive on one controller, including its status conditions."""
+    try:
+        from agent.skills.workloads import WorkloadsSkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]{kind} {namespace}/{name}[/bold cyan]"))
+        detail = WorkloadsSkill().diagnose(kind, name, namespace)
+
+        if not detail.get("found"):
+            console.print()
+            console.print(f"[yellow]{_escape(detail.get('message', 'Not found.'))}[/yellow]")
+            console.print()
+            raise typer.Exit(1)
+
+        w = detail["workload"]
+        t = Table(show_header=False, box=None, padding=(0, 2))
+        t.add_column("k", style="dim", width=18)
+        t.add_column("v")
+        for key in ("kind", "name", "namespace", "desired", "ready", "available", "age"):
+            t.add_row(key, str(w.get(key, "")))
+        if w.get("schedule"):
+            t.add_row("schedule", w["schedule"])
+            t.add_row("last run", w.get("last_schedule_time") or "never")
+            t.add_row("suspended", str(w.get("suspended")))
+        if w.get("images"):
+            t.add_row("images", "\n".join(w["images"]))
+        console.print()
+        console.print(t)
+
+        if detail.get("conditions"):
+            ct = Table(title="Status conditions", box=None, padding=(0, 2))
+            ct.add_column("Type", style="cyan", width=18)
+            ct.add_column("Status", width=8)
+            ct.add_column("Reason", width=26)
+            ct.add_column("Message", style="dim")
+            for c in detail["conditions"]:
+                ct.add_row(c["type"], c["status"], c["reason"], _escape(c["message"][:80]))
+            console.print()
+            console.print(ct)
+
+        if detail.get("issues"):
+            console.print()
+            for i in detail["issues"]:
+                console.print(Panel(
+                    _escape(i["description"]) + "\n\n" +
+                    "\n".join(f"- {_escape(e)}" for e in i["evidence"]) +
+                    (f"\n\n[cyan]{_escape(i['fix_command'])}[/cyan]" if i.get("fix_command") else ""),
+                    border_style=_t1_sev(i["severity"]),
+                    title=f"[bold]{i['problem_type']}[/bold]",
+                ))
+        else:
+            console.print()
+            console.print("[green]No issues detected on this workload.[/green]")
+        console.print()
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+_PATH_STATUS_STYLE = {
+    "ok":      ("green",   "OK"),
+    "warn":    ("yellow",  "WARN"),
+    "fail":    ("bold red", "FAIL"),
+    "skip":    ("dim",     "SKIP"),
+    "unknown": ("magenta", "?"),
+}
+
+
+@path_app.command("trace")
+def path_trace_cmd(
+    url: str = typer.Argument(..., help="URL or hostname, e.g. www.infragpt.online."),
+    namespace: str = typer.Option("", "--namespace", "-n",
+                                  help="Namespace hint; inferred from the Ingress when omitted."),
+    no_ai: bool = typer.Option(False, "--no-ai", help="Skip the Claude narration."),
+) -> None:
+    """Trace a URL hop by hop from the internet to the pod, and name the weakest hop."""
+    try:
+        from agent.observability.costs import get_session_total
+        from agent.skills.request_path import RequestPathSkill
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Request path — {url}[/bold cyan]"))
+
+        report = RequestPathSkill().trace(url, namespace, use_llm=not no_ai)
+
+        t = Table(box=None, padding=(0, 2))
+        t.add_column("#", justify="right", width=2, style="dim")
+        t.add_column("Hop", width=19)
+        t.add_column("Layer", style="dim", width=9)
+        t.add_column("Status", width=6)
+        t.add_column("Latency", justify="right", width=8)
+        t.add_column("Detail", overflow="ellipsis", no_wrap=True)
+
+        for h in report.hops:
+            colour, label = _PATH_STATUS_STYLE.get(h.status.value, ("white", h.status.value))
+            marker = "└─" if h.index == len(report.hops) else "├─"
+            t.add_row(
+                str(h.index),
+                f"[dim]{marker}[/dim] {h.name}",
+                h.layer,
+                f"[{colour}]{label}[/]",
+                f"{h.latency_ms:.0f}ms" if h.latency_ms is not None else "—",
+                _escape(h.summary),
+            )
+        console.print()
+        console.print(t)
+
+        # Evidence for anything that is not plainly OK — that is where the
+        # answer lives, and burying it behind another command wastes the walk.
+        interesting = [h for h in report.hops
+                       if h.status.value in ("fail", "warn", "unknown") and h.evidence]
+        for h in interesting:
+            colour, _ = _PATH_STATUS_STYLE.get(h.status.value, ("white", ""))
+            body = "\n".join(f"- {_escape(e)}" for e in h.evidence if e)
+            if h.fix:
+                body += f"\n\n[bold]Fix:[/bold] {_escape(h.fix)}"
+            if h.fix_command:
+                body += f"\n[cyan]{_escape(h.fix_command)}[/cyan]"
+            console.print()
+            console.print(Panel(body, border_style=colour,
+                                title=f"[bold]hop {h.index} — {h.name}[/bold]"))
+
+        verdict_colour = "green" if report.weakest is None else (
+            "bold red" if report.weakest.status.value == "fail" else "yellow")
+        console.print()
+        console.print(Panel(_escape(report.verdict), border_style=verdict_colour,
+                            title="[bold]Verdict[/bold]"))
+
+        for n in report.notes:
+            console.print(f"[yellow]![/yellow] {_escape(n)}")
+
+        if report.analysis and report.analysis != report.verdict:
+            console.print()
+            console.print(Panel(_escape(report.analysis), border_style="cyan",
+                                title="[bold]Analysis[/bold]"))
+
+        console.print()
+        _cost_footer(get_session_total())
+
+        # Non-zero exit when the path is broken, so this is usable in a check
+        # script or a CI gate without parsing the output.
+        if report.weakest is not None and report.weakest.status.value == "fail":
+            raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@incident_app.command("postmortem")
+def incident_postmortem(
+    incident_id: str = typer.Argument(..., help="Full or short incident id."),
+    no_ai: bool = typer.Option(False, "--no-ai", help="Skip Claude narration; use the deterministic summary."),
+    save: str = typer.Option("", "--save", help="Write the rendered markdown to this file path."),
+) -> None:
+    """Compile a written postmortem from an incident's timeline and whatever
+    other skills diagnosed during its window."""
+    try:
+        from agent.integrations import incident_db
+        from agent.observability.costs import get_session_total
+        from agent.skills.postmortem import PostmortemSkill
+
+        resolved_id = incident_id
+        if incident_db.get_incident(incident_id) is None and len(incident_id) <= 8:
+            for cand in incident_db.list_incidents(limit=200):
+                if cand["id"].startswith(incident_id):
+                    resolved_id = cand["id"]
+                    break
+
+        console.print()
+        console.print(Rule(f"[bold cyan]Postmortem — {incident_id}[/bold cyan]"))
+        report = PostmortemSkill().generate(resolved_id, use_llm=not no_ai)
+
+        if report.degraded and not report.timeline:
+            console.print()
+            _print_error(report.degraded_reason)
+            raise typer.Exit(1)
+
+        t = Table(show_header=False, box=None, padding=(0, 2))
+        t.add_column("k", style="dim", width=18)
+        t.add_column("v")
+        t.add_row("Title", report.title)
+        t.add_row("Severity", report.severity)
+        t.add_row("Service", report.service or "—")
+        t.add_row("Namespace", report.namespace or "—")
+        t.add_row("Duration", f"{report.duration_minutes:.1f} minutes")
+        t.add_row("Auto-fixed", "yes" if report.auto_fixed else "no")
+        t.add_row("Evidence sources", ", ".join(report.evidence_sources) or "incident tracker only")
+        console.print()
+        console.print(t)
+
+        console.print()
+        console.print(Panel(_escape(report.summary), border_style="cyan", title="[bold]Summary[/bold]"))
+        console.print()
+        console.print(Panel(_escape(report.root_cause), border_style="yellow", title="[bold]Root cause[/bold]"))
+
+        if report.what_went_well:
+            console.print()
+            console.print(Panel(_escape(report.what_went_well), border_style="green",
+                                title="[bold]What went well[/bold]"))
+        if report.what_went_wrong:
+            console.print()
+            console.print(Panel(_escape(report.what_went_wrong), border_style="red",
+                                title="[bold]What went wrong[/bold]"))
+
+        if report.action_items:
+            console.print()
+            console.print("[bold]Action items[/bold]")
+            for a in report.action_items:
+                colour = {"high": "bold red", "medium": "yellow", "low": "dim"}.get(a.priority, "white")
+                console.print(f"  [{colour}][{a.priority}][/] {_escape(a.title)} — {_escape(a.rationale)}"
+                             + (f" [dim](owner: {_escape(a.owner_hint)})[/dim]" if a.owner_hint else ""))
+
+        console.print()
+        console.print("[bold]Timeline[/bold]")
+        tt = Table(box=None, padding=(0, 2))
+        tt.add_column("When", style="dim", width=19, no_wrap=True)
+        tt.add_column("Source", style="cyan", width=18, no_wrap=True)
+        tt.add_column("Summary", overflow="ellipsis", no_wrap=True)
+        for e in report.timeline:
+            tt.add_row(e.at[:19], e.source, _escape(e.summary))
+        console.print(tt)
+
+        if report.degraded:
+            console.print()
+            console.print(f"[yellow]![/yellow] {_escape(report.degraded_reason)}")
+
+        if save:
+            from pathlib import Path
+            Path(save).write_text(report.markdown, encoding="utf-8")
+            console.print()
+            console.print(f"[green]Saved markdown to {save}[/green]")
+
+        console.print()
+        _cost_footer(get_session_total())
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
