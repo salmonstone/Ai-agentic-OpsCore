@@ -37,10 +37,18 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
-from urllib.parse import parse_qs
+import urllib.request
+from urllib.parse import parse_qs, urlparse
 
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+# Lets MCP_AUTH_TOKEN live in .env alongside the other secrets (it is already
+# gitignored) instead of being retyped per shell. Does not override a variable
+# that is already set, so an explicit `set VAR=...` still wins.
+load_dotenv()
 
 _TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
 
@@ -50,7 +58,34 @@ _TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
 # — so a tunnelled request fails until its hostname is named here. Hostname
 # wildcards are NOT supported upstream (only ":*" port wildcards), so each
 # public host must be listed exactly. Comma-separated.
+def _ngrok_hostnames() -> list[str]:
+    """Ask a locally-running ngrok agent what public hostnames it is serving.
+
+    The free tier issues a new URL on every restart, so hardcoding it means
+    MCP_ALLOWED_HOSTS silently goes stale and every tunnelled request 421s.
+    ngrok exposes its current tunnels on a local API, so the hostname can just
+    be discovered at startup instead of maintained by hand.
+
+    Best-effort: a short timeout and a broad except, because ngrok not running
+    is the normal case for stdio and must not delay or break startup.
+    """
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=1.5) as resp:
+            tunnels = json.load(resp).get("tunnels", [])
+    except Exception:
+        return []
+
+    hosts = []
+    for t in tunnels:
+        host = urlparse(t.get("public_url", "")).hostname
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
 _ALLOWED_HOSTS = [h.strip() for h in os.getenv("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+if not _ALLOWED_HOSTS and _TRANSPORT in ("http", "streamable-http"):
+    _ALLOWED_HOSTS = _ngrok_hostnames()
 
 
 def _transport_security():
