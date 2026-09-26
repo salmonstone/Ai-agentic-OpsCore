@@ -295,7 +295,14 @@ def collect_all_dns() -> tuple[dict[str, dict], float]:
     results: dict[str, dict] = {}
     t0 = time.perf_counter()
 
-    with ThreadPoolExecutor(max_workers=len(DNS_COLLECTORS)) as pool:
+    # max_workers=2, not len(DNS_COLLECTORS): each collector shells out to its
+    # own `kubectl` subprocess, and running all 6 at once has been observed to
+    # cause real, transient connection failures under load (same root cause as
+    # skills/security.py's run_audit(), which hit the identical symptom with
+    # an unthrottled ThreadPoolExecutor(max_workers=6) and was fixed the same
+    # way — see that file's history). I/O-bound work, so this costs wall time,
+    # not correctness.
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(fn): area for area, fn in DNS_COLLECTORS.items()}
         done, pending = wait(futures, timeout=_TIMEOUT + 10)
 
