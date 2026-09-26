@@ -432,6 +432,58 @@ async def aws_scan(region: str = "", services: str = "ec2,rds,alb") -> dict:
 
 
 @mcp.tool()
+async def aws_inventory(region: str = "", services: str = "ec2,eip,lb,sg") -> dict:
+    """Full AWS resource inventory — every EC2 instance, Elastic IP, load
+    balancer, and security group, not just the unhealthy ones (see aws_scan
+    for that). Read-only, same data as `agent aws list`.
+
+    region: AWS region; defaults to your configured AWS_REGION.
+    services: comma-separated subset — ec2, eip, lb, sg.
+    """
+    def _run():
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from agent.config import settings
+        from agent.integrations.aws import (
+            get_all_ec2, get_all_load_balancers, get_elastic_ips, get_security_groups,
+        )
+
+        r = region or settings.aws_region
+        wanted = {s.strip().lower() for s in services.split(",") if s.strip()}
+        fetchers = {
+            "ec2": get_all_ec2, "eip": get_elastic_ips,
+            "lb": get_all_load_balancers, "sg": get_security_groups,
+        }
+        fetchers = {k: v for k, v in fetchers.items() if k in wanted}
+
+        results: dict[str, list] = {}
+        # max_workers=2, matching the fix applied to dns_collector.py and
+        # security.py's run_audit(): each of these shells out its own boto3
+        # call, and higher unthrottled concurrency has caused real, transient
+        # connection failures elsewhere in this codebase under the same
+        # pattern. The CLI's `agent aws list` still uses 4 workers directly —
+        # left as-is since it has not exhibited the failure, but new call
+        # sites default to the safer value.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {pool.submit(fn, r): name for name, fn in fetchers.items()}
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    results[name] = fut.result()
+                except Exception as exc:
+                    results[name] = {"error": str(exc)}
+
+        return {
+            "region": r,
+            "ec2_instances":     results.get("ec2", []),
+            "elastic_ips":       results.get("eip", []),
+            "load_balancers":    results.get("lb", []),
+            "security_groups":   results.get("sg", []),
+        }
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def aws_diagnose(resource_id: str, resource_type: str, region: str = "") -> dict:
     """AI root-cause diagnosis of one specific AWS resource. Read-only — does
     not apply any fix (see aws_apply_fix for that).
