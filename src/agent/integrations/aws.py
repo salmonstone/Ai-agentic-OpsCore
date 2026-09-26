@@ -247,6 +247,38 @@ def get_unhealthy_rds(region: str) -> list[AwsResource]:
     return resources
 
 
+def get_all_rds(region: str) -> list[dict]:
+    """Return ALL RDS DB instances regardless of status — the counterpart
+    get_unhealthy_rds() is missing: that one only ever returns instances in a
+    problem state, so there was no way to answer "how many databases exist"
+    without also having get_all_ec2's shape available for RDS."""
+    rds = _boto3_client("rds", region)
+    dbs: list[dict] = []
+
+    resp = _safe(rds.describe_db_instances, label="rds.all")
+    if not resp:
+        return []
+
+    for db in resp.get("DBInstances", []):
+        status = db["DBInstanceStatus"]
+        dbs.append({
+            "id":                db["DBInstanceIdentifier"],
+            "engine":            db.get("Engine", "?"),
+            "engine_version":    db.get("EngineVersion", "?"),
+            "status":            status,
+            "instance_class":    db.get("DBInstanceClass", "?"),
+            "multi_az":          db.get("MultiAZ", False),
+            "allocated_storage": db.get("AllocatedStorage", 0),
+            "endpoint":          db.get("Endpoint", {}).get("Address", "?"),
+            "availability_zone": db.get("AvailabilityZone", "?"),
+            "region":            region,
+            "is_healthy":        status not in _RDS_PROBLEM_STATUSES,
+        })
+
+    log.info("aws.rds.all", region=region, count=len(dbs))
+    return dbs
+
+
 def get_rds_detail(db_identifier: str, region: str) -> dict[str, Any]:
     """Return detailed RDS info + recent events for Claude context."""
     rds   = _boto3_client("rds", region)

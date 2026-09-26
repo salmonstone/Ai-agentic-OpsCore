@@ -288,6 +288,19 @@ async def k8s_list_pods(namespace: str = "all", status_filter: str | None = None
 
 
 @mcp.tool()
+async def k8s_list_nodes() -> list[dict]:
+    """List every node in the cluster — status, instance type, kubelet
+    version, capacity/allocatable CPU and memory. Read-only.
+
+    Reuses the same collector agent k8s pods (the full cluster-pod view)
+    already calls for its node summary; this exposes it standalone."""
+    def _run():
+        from agent.integrations.kubectl import get_nodes_detail
+        return [n.model_dump() for n in get_nodes_detail()]
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def k8s_diagnose(pod_name: str, namespace: str) -> dict:
     """Deep AI diagnosis of one specific pod's problem (root cause, suggested
     fix). Read-only — does not apply any fix.
@@ -443,26 +456,27 @@ async def aws_scan(region: str = "", services: str = "ec2,rds,alb") -> dict:
 
 
 @mcp.tool()
-async def aws_inventory(region: str = "", services: str = "ec2,eip,lb,sg") -> dict:
-    """Full AWS resource inventory — every EC2 instance, Elastic IP, load
-    balancer, and security group, not just the unhealthy ones (see aws_scan
-    for that). Read-only, same data as `agent aws list`.
+async def aws_inventory(region: str = "", services: str = "ec2,rds,eip,lb,sg") -> dict:
+    """Full AWS resource inventory — every EC2 instance, RDS database, Elastic
+    IP, load balancer, and security group, not just the unhealthy ones (see
+    aws_scan for that). Read-only, same EC2/EIP/LB/SG data as `agent aws
+    list`, plus RDS which that command doesn't cover either.
 
     region: AWS region; defaults to your configured AWS_REGION.
-    services: comma-separated subset — ec2, eip, lb, sg.
+    services: comma-separated subset — ec2, rds, eip, lb, sg.
     """
     def _run():
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         from agent.config import settings
         from agent.integrations.aws import (
-            get_all_ec2, get_all_load_balancers, get_elastic_ips, get_security_groups,
+            get_all_ec2, get_all_load_balancers, get_all_rds, get_elastic_ips, get_security_groups,
         )
 
         r = region or settings.aws_region
         wanted = {s.strip().lower() for s in services.split(",") if s.strip()}
         fetchers = {
-            "ec2": get_all_ec2, "eip": get_elastic_ips,
+            "ec2": get_all_ec2, "rds": get_all_rds, "eip": get_elastic_ips,
             "lb": get_all_load_balancers, "sg": get_security_groups,
         }
         fetchers = {k: v for k, v in fetchers.items() if k in wanted}
@@ -482,11 +496,12 @@ async def aws_inventory(region: str = "", services: str = "ec2,eip,lb,sg") -> di
                 try:
                     results[name] = fut.result()
                 except Exception as exc:
-                    results[name] = {"error": str(exc)}
+                    results[name] = [{"error": str(exc)}]
 
         return {
             "region": r,
             "ec2_instances":     results.get("ec2", []),
+            "rds_instances":     results.get("rds", []),
             "elastic_ips":       results.get("eip", []),
             "load_balancers":    results.get("lb", []),
             "security_groups":   results.get("sg", []),

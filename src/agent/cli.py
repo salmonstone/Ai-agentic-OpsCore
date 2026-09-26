@@ -3884,6 +3884,55 @@ def k8s_autofix(
 # Command: agent k8s pods
 # ---------------------------------------------------------------------------
 
+@k8s_app.command("nodes")
+def k8s_nodes() -> None:
+    """Show every node in the cluster — status, capacity, allocatable CPU/memory."""
+    try:
+        from agent.integrations.kubectl import get_nodes_detail
+
+        console.print()
+        with console.status("[bold cyan]Fetching node data...", spinner="dots"):
+            nodes = get_nodes_detail()
+
+        node_ready = sum(1 for n in nodes if n.status == "Ready")
+        node_color = "green" if node_ready == len(nodes) else "red"
+        console.print(Panel(
+            f"  [dim]Nodes:[/dim]  [{node_color}]{node_ready}/{len(nodes)} Ready[/{node_color}]",
+            title="[bold]CLUSTER NODES[/bold]", border_style="cyan", padding=(0, 1),
+        ))
+        console.print()
+
+        table = Table(
+            title=f"[bold]NODES[/bold]  [dim]({len(nodes)} total)[/dim]",
+            show_lines=True, header_style="bold cyan", border_style="dim", title_justify="left",
+        )
+        table.add_column("Node Name",     max_width=50, no_wrap=True)
+        table.add_column("Status",        width=10)
+        table.add_column("Roles",         width=12)
+        table.add_column("Age",           width=6)
+        table.add_column("Version",       width=18)
+        table.add_column("Instance Type", width=14)
+        table.add_column("CPU",           justify="right", width=8)
+        table.add_column("Memory",        justify="right", width=12)
+
+        for n in nodes:
+            n_color = "green" if n.status == "Ready" else "bold red"
+            table.add_row(
+                _escape(n.name), f"[{n_color}]{n.status}[/{n_color}]",
+                ", ".join(n.roles), n.age, _escape(n.kubelet_version),
+                _escape(n.instance_type), n.allocatable_cpu, _escape(n.allocatable_memory),
+            )
+
+        console.print(table)
+        console.print()
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
 @k8s_app.command("pods")
 def k8s_pods(
     namespace: Optional[str] = typer.Option(
