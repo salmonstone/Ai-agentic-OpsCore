@@ -415,8 +415,13 @@ async def cost_analyze(days: int = 30) -> dict:
 
 @mcp.tool()
 async def aws_scan(region: str = "", services: str = "ec2,rds,alb") -> dict:
-    """Scan the AWS account for unhealthy EC2, RDS, and ALB resources —
-    each finding includes an AI root-cause diagnosis. Read-only.
+    """Find PROBLEMS in the AWS account — unhealthy EC2/RDS/ALB resources
+    only, each with an AI root-cause diagnosis. Read-only.
+
+    This does NOT report how many resources exist. unhealthy_count=0 means
+    every resource that was checked is healthy, NOT that no resources exist —
+    do not use this to answer "how many EC2 instances are running"; call
+    aws_inventory for the full resource count and list.
 
     region: AWS region to scan; defaults to your configured AWS_REGION.
     services: comma-separated subset to check — ec2, rds, alb.
@@ -427,7 +432,13 @@ async def aws_scan(region: str = "", services: str = "ec2,rds,alb") -> dict:
 
         svc_list = [s.strip().lower() for s in services.split(",") if s.strip()]
         diagnoses = AwsSkill().scan_account(region or settings.aws_region, svc_list)
-        return {"count": len(diagnoses), "diagnoses": [d.model_dump() for d in diagnoses]}
+        return {
+            "unhealthy_count": len(diagnoses),
+            "diagnoses": [d.model_dump() for d in diagnoses],
+            "note": "unhealthy_count is problems found, not total resources. "
+                    "0 means healthy, not absent. Call aws_inventory for the "
+                    "actual resource count and list.",
+        }
     return await asyncio.to_thread(_run)
 
 
