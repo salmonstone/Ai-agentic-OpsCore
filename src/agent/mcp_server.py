@@ -432,6 +432,33 @@ async def aws_scan(region: str = "", services: str = "ec2,rds,alb") -> dict:
 
 
 @mcp.tool()
+async def aws_diagnose(resource_id: str, resource_type: str, region: str = "") -> dict:
+    """AI root-cause diagnosis of one specific AWS resource. Read-only — does
+    not apply any fix (see aws_apply_fix for that).
+
+    resource_id: instance ID, DB identifier, or target group ARN.
+    resource_type: "ec2" | "rds" | "alb".
+    region: AWS region; defaults to your configured AWS_REGION.
+    """
+    def _run():
+        from agent.config import settings
+        from agent.core.models import AwsResource, AwsResourceType
+        from agent.skills.aws import AwsSkill
+
+        type_map = {"ec2": AwsResourceType.EC2, "rds": AwsResourceType.RDS, "alb": AwsResourceType.ALB}
+        rtype = type_map.get(resource_type.lower())
+        if rtype is None:
+            return {"error": f"Unknown resource type: {resource_type!r}. Use: ec2, rds, alb"}
+
+        resource = AwsResource(
+            id=resource_id, name=resource_id, resource_type=rtype,
+            status="unknown", region=region or settings.aws_region,
+        )
+        return AwsSkill().diagnose_resource(resource).model_dump()
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def aws_auth_status() -> dict:
     """Verify the configured AWS auth method (IAM role / access key / SSO
     profile) currently works, and return the resolved identity. Read-only."""
@@ -564,7 +591,8 @@ async def tls_apply_fix(name: str, namespace: str, kind: str = "certificate", co
 @_mutating_tool()
 async def aws_apply_fix(resource_id: str, resource_type: str, region: str = "", confirm: bool = False) -> dict:
     """Diagnose one specific AWS resource and apply the suggested fix —
-    scoped to exactly this one resource, never account-wide.
+    scoped to exactly this one resource, never account-wide. For the
+    diagnosis alone, without applying anything, use aws_diagnose.
 
     resource_id: instance ID, DB identifier, or target group ARN.
     resource_type: "ec2" | "rds" | "alb".
@@ -659,7 +687,7 @@ async def dns_scan() -> dict:
     external-dns, ndots. Read-only."""
     def _run():
         from agent.skills.dns import DNSSkill
-        return {"report": DNSSkill().scan()}
+        return DNSSkill().scan().model_dump()
     return await asyncio.to_thread(_run)
 
 

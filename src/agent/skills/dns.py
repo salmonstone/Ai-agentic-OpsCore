@@ -91,7 +91,7 @@ class DNSSkill(BaseSkill):
     # Public helpers
     # ------------------------------------------------------------------
 
-    def scan(self) -> str:
+    def scan(self) -> DNSScanReport:
         from rich.console import Console
         from rich.panel import Panel
         from rich.rule import Rule
@@ -147,7 +147,7 @@ class DNSSkill(BaseSkill):
         )
 
         _render_scan(console, report)
-        return "scan_complete"
+        return report
 
     def diagnose(self, name: str, ns: str = "kube-system") -> DNSDiagnosis:
         from rich.console import Console
