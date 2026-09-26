@@ -301,6 +301,22 @@ async def k8s_list_nodes() -> list[dict]:
 
 
 @mcp.tool()
+async def k8s_pod_metrics(namespace: str = "all") -> list[dict]:
+    """Real per-pod CPU/memory usage from the metrics-server (kubectl top
+    pods), each with its percentage against its resource limit. Read-only.
+
+    Empty list means the metrics-server isn't installed/reachable, not that
+    no pods exist — check k8s_list_pods for the pod list itself.
+
+    namespace: Kubernetes namespace, or "all" for every namespace.
+    """
+    def _run():
+        from agent.integrations.kubectl import get_pod_metrics
+        return [m.model_dump() for m in get_pod_metrics(namespace)]
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def k8s_diagnose(pod_name: str, namespace: str) -> dict:
     """Deep AI diagnosis of one specific pod's problem (root cause, suggested
     fix). Read-only — does not apply any fix.
