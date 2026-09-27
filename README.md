@@ -32,6 +32,24 @@ uv pip install -e .
 agent setup
 ```
 
+## Backups
+
+All state (memory and audit trail, incidents, deploys, SLOs, vault, semantic
+memory) lives in `data/` and `chroma_db/`. Back it up with:
+
+```bash
+agent backup create          # verified snapshot → backups/atlasos-<UTC time>.tar.gz
+agent backup list            # newest first
+agent backup verify <name>   # checksums + database integrity, restores nothing
+agent backup restore <name>  # asks first; saves the current state as a pre-restore backup
+```
+
+Databases are snapshotted with SQLite's online backup API, so it's safe while
+the agent is running. Secrets (`.env`, Gmail tokens) are never included.
+`create` keeps the newest backup of each of the last 7 days plus 4 older
+weeks. `backup.bat` has the Task Scheduler command for a daily run.
+Backups are local-only for now: copy `backups/` somewhere off this disk.
+
 ## What You Can Configure
 
 The `agent setup` wizard walks you through each integration:

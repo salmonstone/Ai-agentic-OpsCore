@@ -303,6 +303,12 @@ jenkins_app = typer.Typer(
 )
 app.add_typer(jenkins_app, name="jenkins")
 
+backup_app = typer.Typer(
+    help="Back up and restore local state — memory, incidents, deploys, vault.",
+    no_args_is_help=True,
+)
+app.add_typer(backup_app, name="backup")
+
 console = Console()
 
 # ---------------------------------------------------------------------------
@@ -13830,6 +13836,131 @@ def events_enqueue(
 
     eid = enqueue(event_type, data, priority=priority)
     console.print(f"[green]✓ Enqueued[/green] [cyan]{event_type}[/cyan] → ID: [dim]{eid[:8]}[/dim]")
+    console.print()
+
+
+# ---------------------------------------------------------------------------
+# Commands: agent backup create / list / verify / restore
+# ---------------------------------------------------------------------------
+
+def _audit_backup(content: str, **metadata) -> None:
+    """Record a backup/restore in the audit trail without failing the command
+    if memory is unavailable — the archive itself is the thing that matters."""
+    try:
+        from agent.memory.retrieval import remember
+        remember(content, source="backup", metadata=metadata)
+    except Exception as exc:
+        console.print(f"[dim]  (audit trail not updated: {_escape(str(exc)[:120])})[/dim]")
+
+
+def _fmt_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n} B"
+
+
+@backup_app.command("create")
+def backup_create(
+    keep_daily:  int  = typer.Option(7, "--keep-daily", help="Days of backups to keep (newest per day)."),
+    keep_weekly: int  = typer.Option(4, "--keep-weekly", help="Older weeks to keep (newest per week)."),
+    no_prune:    bool = typer.Option(False, "--no-prune", help="Keep every existing backup."),
+) -> None:
+    """Snapshot data/ and chroma_db/ into a verified archive in backups/."""
+    from agent.core import backup as bk
+    try:
+        info = bk.create_backup()
+        manifest = bk.verify_backup(info.path)
+    except bk.BackupError as e:
+        _print_error(f"Backup failed: {e}")
+        raise typer.Exit(1)
+
+    n_files = len(manifest["files"])
+    n_db = sum(1 for f in manifest["files"].values() if f["sqlite"])
+    console.print(f"[green]✓ Backup created[/green] [cyan]{info.name}[/cyan]  "
+                  f"({_fmt_size(info.size)}, {n_files} files, {n_db} databases — verified)")
+    console.print(f"  [dim]{info.path}[/dim]")
+
+    removed = [] if no_prune else bk.prune(keep_daily=keep_daily, keep_weekly=keep_weekly)
+    if removed:
+        console.print(f"  [dim]Pruned {len(removed)} old backup(s): "
+                      f"{', '.join(b.name for b in removed)}[/dim]")
+    _audit_backup(f"Backup created: {info.name} ({n_files} files, {n_db} databases)",
+                  archive=info.name, files=n_files, pruned=len(removed))
+    console.print()
+
+
+@backup_app.command("list")
+def backup_list() -> None:
+    """List backups, newest first."""
+    from agent.core import backup as bk
+    backups = bk.list_backups()
+    if not backups:
+        console.print(f"[yellow]No backups yet in {bk.backup_dir()}[/yellow] — run [cyan]agent backup create[/cyan].")
+        return
+    t = Table(box=None, padding=(0, 2))
+    t.add_column("Name", style="cyan")
+    t.add_column("Created (local)")
+    t.add_column("Size", justify="right")
+    t.add_column("")
+    for b in backups:
+        t.add_row(b.name, b.created.astimezone().strftime("%Y-%m-%d %H:%M"),
+                  _fmt_size(b.size), "[dim]pre-restore[/dim]" if b.pre_restore else "")
+    console.print(t)
+    console.print(f"[dim]{len(backups)} backup(s) in {bk.backup_dir()}[/dim]")
+
+
+@backup_app.command("verify")
+def backup_verify(
+    name: str = typer.Argument(..., help="Backup name from `agent backup list`, or a path."),
+) -> None:
+    """Check a backup's checksums and database integrity without restoring it."""
+    from agent.core import backup as bk
+    try:
+        manifest = bk.verify_backup(bk.resolve(name))
+    except bk.BackupError as e:
+        _print_error(f"Backup is NOT usable: {e}")
+        raise typer.Exit(1)
+    console.print(f"[green]✓ {_escape(name)} is intact[/green] — "
+                  f"{len(manifest['files'])} files match their checksums, databases pass integrity_check.")
+
+
+@backup_app.command("restore")
+def backup_restore(
+    name: str  = typer.Argument(..., help="Backup name from `agent backup list`, or a path."),
+    yes:  bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Restore data/ and chroma_db/ from a backup (current state is backed up first)."""
+    from agent.core import backup as bk
+    try:
+        archive = bk.resolve(name)
+        manifest = bk.verify_backup(archive)
+    except bk.BackupError as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Restore {archive.name}[/bold] (taken {manifest['created']})")
+    console.print(f"  Overwrites {len(manifest['files'])} files under data/ and chroma_db/.")
+    console.print("  The current state is saved as a [cyan]pre-restore[/cyan] backup first.")
+    console.print("  [yellow]Stop the MCP server, daemon and dashboard first[/yellow] — "
+                  "Windows can't overwrite files they hold open.")
+    if not yes and not typer.confirm("Proceed?", default=False):
+        console.print("[dim]Cancelled — nothing changed.[/dim]")
+        raise typer.Exit(0)
+
+    try:
+        _, safety = bk.restore_backup(archive)
+    except (bk.BackupError, OSError) as e:
+        _print_error(f"Restore failed: {e}")
+        raise typer.Exit(1)
+
+    if safety:
+        console.print(f"  [dim]Previous state saved as {safety.name}[/dim]")
+    console.print(f"[green]✓ Restored {archive.name}[/green]")
+    _audit_backup(f"Restored backup {archive.name}"
+                  + (f" (previous state saved as {safety.name})" if safety else ""),
+                  archive=archive.name, safety=safety.name if safety else "")
     console.print()
 
 
