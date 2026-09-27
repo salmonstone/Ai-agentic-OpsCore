@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A newer push to the same branch makes an in-flight run for it obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    # This job name is what the branch ruleset's "Require status checks"
+    # selects — renaming it silently detaches the gate.
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # --locked fails if uv.lock no longer matches pyproject.toml, which
+      # catches a dependency added to one but not the other.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Compile check
+        run: uv run python -m compileall -q src tests
+
+      - name: Import check
+        run: |
+          uv run agent --help > /dev/null
+          uv run python -c "import agent.mcp_server"
+
+      # Deterministic tests only. The eval suites (agent eval ...) need an
+      # Anthropic API key and live Jenkins/EKS, so they stay manual.
+      - name: Tests
+        run: uv run pytest -q
