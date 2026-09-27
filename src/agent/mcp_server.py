@@ -68,9 +68,13 @@ def _ngrok_hostnames() -> list[str]:
 
     Best-effort: a short timeout and a broad except, because ngrok not running
     is the normal case for stdio and must not delay or break startup.
+
+    NGROK_API_URL overrides the address: inside a container 127.0.0.1 is the
+    container itself, so ngrok on the host is reached via host.docker.internal.
     """
+    api = os.getenv("NGROK_API_URL", "http://127.0.0.1:4040").rstrip("/")
     try:
-        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=1.5) as resp:
+        with urllib.request.urlopen(f"{api}/api/tunnels", timeout=1.5) as resp:
             tunnels = json.load(resp).get("tunnels", [])
     except Exception:
         return []

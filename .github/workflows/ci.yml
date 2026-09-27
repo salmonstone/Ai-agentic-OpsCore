@@ -44,3 +44,52 @@ jobs:
       # Anthropic API key and live Jenkins/EKS, so they stay manual.
       - name: Tests
         run: uv run pytest -q
+
+  docker:
+    # Separate job name — add it to the ruleset's required checks too, so a
+    # broken Dockerfile blocks a merge the same way a failing test does.
+    name: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose file
+        run: docker compose config --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build only, never push: the image stays on the runner and is discarded.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: atlasos:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          # The bundled CLIs and the app must all start inside the image.
+          docker run --rm atlasos:ci kubectl version --client
+          docker run --rm atlasos:ci helm version --short
+          docker run --rm atlasos:ci aws --version
+          docker run --rm atlasos:ci agent --help > /dev/null
+          # Runs as the unprivileged user, not root.
+          test "$(docker run --rm atlasos:ci id -u)" = "10001"
+          # No secrets baked in.
+          ! docker run --rm atlasos:ci test -e /app/.env
+          # Fail-closed: HTTP mode must refuse to start without a token.
+          ! docker run --rm -e MCP_ALLOWED_HOSTS=test.invalid atlasos:ci
+          # And with one, it serves and the healthcheck's 401 probe answers.
+          docker run -d --name smoke -e MCP_AUTH_TOKEN=ci-smoke -e MCP_ALLOWED_HOSTS=test.invalid -p 127.0.0.1:8000:8000 atlasos:ci
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/mcp || true)
+            [ "$code" = "401" ] && break
+            sleep 2
+          done
+          docker logs smoke
+          test "$code" = "401"
+          docker rm -f smoke

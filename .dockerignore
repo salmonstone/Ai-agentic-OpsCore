@@ -1,0 +1,41 @@
+# Everything sent to `docker build` can end up in an image layer, and anyone
+# who pulls the image can read every layer. So: secrets and personal data
+# never enter the build context. They are mounted at run time instead.
+
+# Secrets / credentials
+.env
+.env.*
+**/*.pem
+**/*.key
+**/credentials*
+**/*token*.json
+.aws/
+.kube/
+
+# Runtime state — mounted as volumes, never baked in
+data/
+chroma_db/
+backups/
+project_scan.json
+
+# VCS, tooling, caches
+.git/
+.github/
+.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.claude/
+.vscode/
+.idea/
+*.code-workspace
+**/node_modules/
+
+# Not needed at run time
+tests/
+evals/
+scripts/
+deployment/
+*.bat
+*.md
+!README.md
