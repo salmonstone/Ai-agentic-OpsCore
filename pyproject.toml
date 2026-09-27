@@ -23,6 +23,9 @@ dependencies = [
     "psutil>=5.9.0",
     "mcp<2",
     "voyageai>=0.4.0,<0.5",
+    "boto3>=1.34",
+    "cryptography>=42",
+    "pyyaml>=6",
 ]
 
 [tool.uv]

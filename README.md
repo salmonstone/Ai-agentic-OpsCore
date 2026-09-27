@@ -32,6 +32,42 @@ uv pip install -e .
 agent setup
 ```
 
+## Run in Docker
+
+The image bundles Python, all dependencies, and pinned `kubectl` / `aws` / `helm`.
+It contains no credentials: `~/.aws`, `~/.kube/config` and `.env` are mounted
+read-only when the container starts.
+
+```bash
+docker compose up -d --build                       # MCP server on 127.0.0.1:8000
+docker compose logs -f                             # follow output
+docker compose run --rm atlasos agent k8s nodes    # any CLI command, one-off
+docker compose down                                # stop
+```
+
+`.env` must contain `MCP_AUTH_TOKEN`; the server refuses to start without it.
+`data/` and `chroma_db/` are shared with a local run, so use one or the other,
+since both bind port 8000. Adding a cluster (`agent k8s add-cluster`) writes
+kubeconfig, so do that on the host; the container picks it up on restart.
+
+## Backups
+
+All state (memory and audit trail, incidents, deploys, SLOs, vault, semantic
+memory) lives in `data/` and `chroma_db/`. Back it up with:
+
+```bash
+agent backup create          # verified snapshot → backups/atlasos-<UTC time>.tar.gz
+agent backup list            # newest first
+agent backup verify <name>   # checksums + database integrity, restores nothing
+agent backup restore <name>  # asks first; saves the current state as a pre-restore backup
+```
+
+Databases are snapshotted with SQLite's online backup API, so it's safe while
+the agent is running. Secrets (`.env`, Gmail tokens) are never included.
+`create` keeps the newest backup of each of the last 7 days plus 4 older
+weeks. `backup.bat` has the Task Scheduler command for a daily run.
+Backups are local-only for now: copy `backups/` somewhere off this disk.
+
 ## What You Can Configure
 
 The `agent setup` wizard walks you through each integration:
