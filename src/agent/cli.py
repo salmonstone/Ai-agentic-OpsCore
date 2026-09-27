@@ -309,6 +309,12 @@ backup_app = typer.Typer(
 )
 app.add_typer(backup_app, name="backup")
 
+supervise_app = typer.Typer(
+    help="Keep the MCP server and ngrok tunnel running — restart on crash, hang, or reboot.",
+    no_args_is_help=True,
+)
+app.add_typer(supervise_app, name="supervise")
+
 console = Console()
 
 # ---------------------------------------------------------------------------
@@ -13973,6 +13979,138 @@ def backup_restore(
                   + (f" (previous state saved as {safety.name})" if safety else ""),
                   archive=archive.name, safety=safety.name if safety else "")
     console.print()
+
+
+# ---------------------------------------------------------------------------
+# Commands: agent supervise run / status / stop / logs
+# ---------------------------------------------------------------------------
+
+_SUPERVISE_DEFAULT = "ngrok,mcp"
+
+
+@supervise_app.command("run")
+def supervise_run(
+    services: str = typer.Option(_SUPERVISE_DEFAULT, "--services", "-s",
+                                 help="Comma-separated: ngrok, mcp, daemon. The daemon applies "
+                                      "fixes autonomously, so it is opt-in."),
+) -> None:
+    """Run the supervisor in the foreground (Task Scheduler starts it at sign-in)."""
+    import os
+    from agent.core import supervisor as sv
+
+    available = sv.default_services()
+    names = [n.strip() for n in services.split(",") if n.strip()]
+    unknown = [n for n in names if n not in available]
+    if unknown or not names:
+        _print_error(f"Unknown service(s): {', '.join(unknown) or '(none given)'}. "
+                     f"Choose from: {', '.join(available)}")
+        raise typer.Exit(2)
+
+    existing = sv.running_supervisor_pid()
+    if existing:
+        console.print(f"[yellow]Supervisor already running (PID {existing}).[/yellow] "
+                      f"See [cyan]agent supervise status[/cyan].")
+        raise typer.Exit(0)
+    if not os.getenv("MCP_AUTH_TOKEN", "").strip() and "mcp" in names:
+        _print_error("MCP_AUTH_TOKEN is not set in .env; the MCP server would refuse to start.")
+        raise typer.Exit(1)
+
+    Path("data").mkdir(exist_ok=True)
+    killed = sv.kill_orphans()
+    if killed:
+        console.print(f"[dim]Cleaned up {len(killed)} process(es) left by a previous run: {killed}[/dim]")
+    sv.PID_FILE.write_text(str(os.getpid()))
+    # Preserve dependency order (ngrok before mcp) regardless of how they were typed.
+    specs = [spec for name, spec in available.items() if name in names]
+    console.print(f"[green]Supervising:[/green] {', '.join(s.name for s in specs)}  "
+                  f"[dim](stop: agent supervise stop — logs: data/logs/)[/dim]")
+    try:
+        sv.Supervisor(specs).run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sv.PID_FILE.unlink(missing_ok=True)
+    console.print("[dim]Supervisor stopped.[/dim]")
+
+
+@supervise_app.command("status")
+def supervise_status() -> None:
+    """Show each supervised service: state, health, restarts, PID."""
+    from agent.core import supervisor as sv
+    pid = sv.running_supervisor_pid()
+    try:
+        state = json.loads(sv.STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = None
+    if not pid:
+        console.print("[yellow]Supervisor is not running.[/yellow]  "
+                      "Start: [cyan]start-atlasos.bat[/cyan] or [cyan]agent supervise run[/cyan]")
+        if not state:
+            return
+        console.print("[dim]Last known state:[/dim]")
+    else:
+        console.print(f"[green]Supervisor running[/green] (PID {pid}, since {state and state.get('started')})")
+    if not state:
+        return
+    t = Table(box=None, padding=(0, 2))
+    for col in ("Service", "State", "Healthy", "PID", "Restarts", "Detail"):
+        t.add_column(col)
+    colors = {"running": "green", "waiting": "yellow", "reconfiguring": "yellow",
+              "crashed": "red", "unhealthy": "red", "failed": "red", "unavailable": "red"}
+    for name, svc in state.get("services", {}).items():
+        st = svc.get("state", "?")
+        detail = svc.get("reason") or ""
+        if svc.get("next_retry_in") is not None and st in ("crashed", "unhealthy", "failed"):
+            detail += f" — retry in {svc['next_retry_in']}s"
+        t.add_row(name, f"[{colors.get(st, 'white')}]{st}[/]",
+                  "yes" if svc.get("healthy") else "no",
+                  str(svc.get("pid") or "-"), str(svc.get("restarts", 0)), _escape(detail))
+    console.print(t)
+    try:
+        from agent.core.supervisor import ngrok_hosts
+        hosts = ngrok_hosts()
+        if hosts:
+            console.print(f"[dim]Public URL: https://{hosts[0]}/mcp[/dim]")
+    except Exception:
+        pass
+
+
+@supervise_app.command("stop")
+def supervise_stop(
+    timeout: int = typer.Option(30, "--timeout", help="Seconds to wait for a clean stop."),
+) -> None:
+    """Stop the supervisor and everything it runs."""
+    import time as _time
+    from agent.core import supervisor as sv
+    pid = sv.running_supervisor_pid()
+    if not pid:
+        console.print("[yellow]Supervisor is not running.[/yellow]")
+        return
+    sv.STOP_FILE.write_text("stop requested by `agent supervise stop`")
+    deadline = _time.time() + timeout
+    while sv.running_supervisor_pid() and _time.time() < deadline:
+        _time.sleep(0.5)
+    if sv.running_supervisor_pid():
+        _print_error(f"Supervisor (PID {pid}) did not stop within {timeout}s.")
+        raise typer.Exit(1)
+    console.print(f"[green]✓ Supervisor stopped[/green] (was PID {pid}); its services are down.")
+
+
+@supervise_app.command("logs")
+def supervise_logs(
+    service: str = typer.Argument("mcp", help="ngrok, mcp or daemon."),
+    tail: int = typer.Option(40, "--tail", "-n", help="Lines from the end."),
+) -> None:
+    """Print the end of a supervised service's log."""
+    from agent.core import supervisor as sv
+    path = sv.LOG_DIR / f"{service}.log"
+    if not path.exists():
+        console.print(f"[yellow]No log yet at {path}[/yellow]")
+        return
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]
+    console.print(Rule(f"[bold cyan]{_escape(str(path))}[/bold cyan]"))
+    for line in lines:
+        console.print(_escape(line), highlight=False)
 
 
 # ---------------------------------------------------------------------------

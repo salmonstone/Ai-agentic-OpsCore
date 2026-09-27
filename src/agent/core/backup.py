@@ -52,7 +52,7 @@ EXCLUDE = (
     "*.env", ".env*",
     # Runtime noise, regenerated on start.
     "data/*.pid", "data/*.log", "data/*_stdout.txt", "data/*_stderr.txt",
-    "data/_*.py",
+    "data/_*.py", "data/supervisor.*",
     # SQLite side files: their contents are folded into the snapshot.
     "*-journal", "*-wal", "*-shm",
 )
