@@ -133,6 +133,19 @@ def test_ngrok_hostname_discovery(monkeypatch):
     assert mcp_server._ngrok_hostnames() == ["abc.ngrok-free.dev", "other.ngrok.app"]
 
 
+def test_ngrok_api_url_is_overridable(monkeypatch):
+    # In a container, ngrok runs on the host, not at the container's 127.0.0.1.
+    seen = []
+
+    def fake_urlopen(url, timeout):
+        seen.append(url)
+        raise OSError("unreachable")
+    monkeypatch.setenv("NGROK_API_URL", "http://host.docker.internal:4040/")
+    monkeypatch.setattr(mcp_server.urllib.request, "urlopen", fake_urlopen)
+    mcp_server._ngrok_hostnames()
+    assert seen == ["http://host.docker.internal:4040/api/tunnels"]
+
+
 def test_ngrok_absent_returns_empty_instead_of_raising(monkeypatch):
     def boom(*a, **k):
         raise OSError("connection refused")

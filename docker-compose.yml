@@ -1,0 +1,51 @@
+# Run AtlasOS in a container:
+#
+#   docker compose up -d --build     start the MCP server (port 8000, localhost only)
+#   docker compose logs -f           follow its output
+#   docker compose down              stop it
+#   docker compose run --rm atlasos agent k8s nodes    any CLI command, one-off
+#
+# Credentials are mounted read-only at run time; the image itself holds none.
+# The container shares data/ and chroma_db/ with a local (non-Docker) run, so
+# run one or the other — both bind port 8000.
+
+services:
+  atlasos:
+    build: .
+    image: atlasos:local
+    container_name: atlasos
+    restart: unless-stopped
+
+    # Secrets and settings: same .env the local run uses. Optional so that
+    # `docker compose config` / CI can validate this file without one.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0          # inside the container; exposure is set by `ports`
+      # ngrok runs on the host, not in here — auto-detect the tunnel hostname
+      # through the host gateway. Set MCP_ALLOWED_HOSTS in .env to pin it instead.
+      NGROK_API_URL: http://host.docker.internal:4040
+
+    # Published on the host's loopback only: reachable by ngrok on this machine,
+    # not by anything else on the network.
+    ports:
+      - "127.0.0.1:8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux hosts; Docker Desktop has it built in
+
+    volumes:
+      # Credentials — read-only. ~/.aws covers access-key profiles (e.g. "2")
+      # and SSO alike; kubeconfig's `aws eks get-token` resolves through it.
+      - ~/.aws:/home/atlas/.aws:ro
+      - ~/.kube/config:/home/atlas/.kube/config:ro
+      # State — survives container rebuilds. On a Linux host, these dirs must
+      # be writable by uid 10001:  sudo chown -R 10001 data chroma_db
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
