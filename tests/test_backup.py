@@ -280,3 +280,14 @@ def test_prune_with_few_backups_removes_nothing(dest):
     for d in range(3):
         _fake(dest, t0 + timedelta(days=d))
     assert bk.prune(dest) == []
+
+
+def test_latest_backup_ignores_pre_restore(dest):
+    t0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    regular = _fake(dest, t0)
+    _fake(dest, t0 + timedelta(days=1), pre_restore=True)
+    assert bk.latest_backup(dest).name == regular
+
+
+def test_latest_backup_none_when_empty(dest):
+    assert bk.latest_backup(dest) is None

@@ -242,6 +242,11 @@ def list_backups(dest: Path | None = None) -> list[BackupInfo]:
     return sorted(found, key=lambda b: (b.created, b.name), reverse=True)
 
 
+def latest_backup(dest: Path | None = None) -> BackupInfo | None:
+    """Newest regular (non-pre-restore) backup, or None."""
+    return next((b for b in list_backups(dest) if not b.pre_restore), None)
+
+
 def resolve(name_or_path: str, dest: Path | None = None) -> Path:
     p = Path(name_or_path)
     if p.is_file():

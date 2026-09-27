@@ -13866,9 +13866,20 @@ def backup_create(
     keep_daily:  int  = typer.Option(7, "--keep-daily", help="Days of backups to keep (newest per day)."),
     keep_weekly: int  = typer.Option(4, "--keep-weekly", help="Older weeks to keep (newest per week)."),
     no_prune:    bool = typer.Option(False, "--no-prune", help="Keep every existing backup."),
+    skip_within: float = typer.Option(0, "--skip-if-within", metavar="HOURS",
+                                      help="Do nothing if a backup already exists from the last HOURS "
+                                           "(for triggers that fire often, like unlocking the laptop)."),
 ) -> None:
     """Snapshot data/ and chroma_db/ into a verified archive in backups/."""
     from agent.core import backup as bk
+    if skip_within > 0:
+        last = bk.latest_backup()
+        if last:
+            age_h = (datetime.now(last.created.tzinfo) - last.created).total_seconds() / 3600
+            if age_h < skip_within:
+                console.print(f"[dim]Skipped: {last.name} is {age_h:.1f}h old "
+                              f"(< {skip_within:g}h).[/dim]")
+                return
     try:
         info = bk.create_backup()
         manifest = bk.verify_backup(info.path)
