@@ -32,6 +32,9 @@ agent = "agent.cli:app"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+# Without this pytest walks the whole repo and collides scripts/test_triage.py
+# (a manual script, not a test) with tests/test_triage.py, failing collection.
+testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
