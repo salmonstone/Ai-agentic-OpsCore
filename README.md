@@ -50,6 +50,23 @@ docker compose down                                # stop
 since both bind port 8000. Adding a cluster (`agent k8s add-cluster`) writes
 kubeconfig, so do that on the host; the container picks it up on restart.
 
+## Keep It Running
+
+`agent supervise` runs ngrok and the remote MCP server, restarts either one if
+it crashes or stops responding (backoff 2s up to 5 min), and hands the MCP
+server ngrok's current hostname so tunnelled requests never 421.
+
+```bash
+start-atlasos.bat                  # start (also runs at sign-in and unlock via Task Scheduler)
+agent supervise status             # state, health, restarts, public URL
+agent supervise logs mcp           # or: ngrok, daemon
+agent supervise stop               # stop everything cleanly
+```
+
+The autonomous healing daemon applies fixes on its own, so it is opt-in:
+`agent supervise run --services ngrok,mcp,daemon`. In Docker, the compose
+`restart: unless-stopped` policy does the same job for the container.
+
 ## Backups
 
 All state (memory and audit trail, incidents, deploys, SLOs, vault, semantic
