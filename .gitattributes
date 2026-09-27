@@ -1,0 +1,5 @@
+# Files executed inside Linux containers/runners must keep LF endings;
+# a CRLF breaks backslash line continuations in RUN/HEALTHCHECK.
+Dockerfile text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
