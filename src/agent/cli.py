@@ -12221,7 +12221,7 @@ def daemon_check_cost_anomalies(
                                help="Ignore the per-day cooldown and alert again even if today "
                                     "already triggered one."),
 ) -> None:
-    """Run the nightly AWS spend-anomaly check now instead of waiting for 1:03 AM.
+    """Run the nightly AWS spend-anomaly check now instead of waiting for the nightly run.
 
     Looks at the most recent day AWS has billing data for; if it's a
     statistical outlier vs. the last 30 days, sends the same Slack alert the
@@ -12241,7 +12241,7 @@ def daemon_check_rds_capacity(
     force: bool = typer.Option(False, "--force",
                                help="Ignore the 7-day per-instance cooldown and alert again if still critical."),
 ) -> None:
-    """Run the nightly RDS storage-capacity check now instead of waiting for 1:03 AM.
+    """Run the nightly RDS storage-capacity check now instead of waiting for the nightly run.
 
     Alerts only for an instance trending toward under 14 days of free
     storage left. Safe to run any time — read-only against CloudWatch."""
