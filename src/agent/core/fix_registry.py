@@ -51,15 +51,16 @@ def load() -> dict[str, Executor]:
 
     from agent.mcp_server import (
         aws_apply_fix, cost_apply_fix, ingress_apply_fix,
-        jenkins_apply_fix, k8s_apply_fix, tls_apply_fix,
+        jenkins_apply_fix, k8s_apply_fix, k8s_crashloop_apply_fix, tls_apply_fix,
     )
     _REGISTRY.update({
-        "jenkins_apply_fix": jenkins_apply_fix,
-        "k8s_apply_fix":     k8s_apply_fix,
-        "ingress_apply_fix": ingress_apply_fix,
-        "tls_apply_fix":     tls_apply_fix,
-        "aws_apply_fix":     aws_apply_fix,
-        "cost_apply_fix":    cost_apply_fix,
+        "jenkins_apply_fix":         jenkins_apply_fix,
+        "k8s_apply_fix":             k8s_apply_fix,
+        "k8s_crashloop_apply_fix":   k8s_crashloop_apply_fix,
+        "ingress_apply_fix":         ingress_apply_fix,
+        "tls_apply_fix":             tls_apply_fix,
+        "aws_apply_fix":             aws_apply_fix,
+        "cost_apply_fix":            cost_apply_fix,
     })
     return _REGISTRY
 

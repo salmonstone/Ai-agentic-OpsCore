@@ -385,6 +385,33 @@ async def k8s_apply_fix(pod_name: str, namespace: str, confirm: bool = False) ->
     return await asyncio.to_thread(_run)
 
 
+@_mutating_tool()
+async def k8s_crashloop_apply_fix(
+    pod_name: str, namespace: str, deployment: str, container_name: str,
+    fix_kind: str, fix_value: str, restart_count: int = 0, inc_id: str = "",
+    confirm: bool = False,
+) -> dict:
+    """Apply a crashloop fix the autonomous daemon proposed — an AI-guessed
+    container command patch or kubectl command — after a plain rolling
+    restart didn't recover the pod on its own. Not something to call from
+    scratch: the daemon (agent.skills.healer) proposes these via Slack with
+    all the right parameters already filled in; this applies exactly that
+    proposal once approved.
+
+    fix_kind: "patch_command" (fix_value is a JSON array, the new container
+        command) or "kubectl" (fix_value is the command to run).
+    confirm: must be explicitly True, or nothing is applied.
+    """
+    def _run():
+        from agent.skills.healer import apply_crashloop_fix
+        if not confirm:
+            return {"applied": False, "message": "Set confirm=True to actually apply this fix.",
+                    "fix_kind": fix_kind, "fix_value": fix_value}
+        return apply_crashloop_fix(pod_name, namespace, deployment, container_name,
+                                   fix_kind, fix_value, restart_count, inc_id)
+    return await asyncio.to_thread(_run)
+
+
 @mcp.tool()
 async def tls_scan() -> dict:
     """Audit TLS certificates across every Ingress in the cluster — expiry,
