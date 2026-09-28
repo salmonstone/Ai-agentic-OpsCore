@@ -299,5 +299,67 @@ async def _handle_slack_action(payload: dict) -> None:
             )
         except Exception as exc:
             log.warning("slack.action.reject_failed", error=str(exc))
+
+    elif action_id in ("approve_action", "reject_action"):
+        await _handle_fix_action(action_id, action.get("value", ""), user, response_url)
+
     else:
         log.warning("slack.action.unknown", action_id=action_id)
+
+
+async def _handle_fix_action(action_id: str, action_pk: str, user: str, response_url: str) -> None:
+    """Dispatch an approve/reject click on one of the generic *_apply_fix
+    proposals (agent.core.approvals + fix_registry) — separate from the
+    deploy-specific flow above, which this does not touch."""
+    from agent.core import approvals
+    from agent.integrations.slack import update_action_message
+    from agent.memory.retrieval import remember
+
+    pending = approvals.get(action_pk)
+    if pending is None:
+        update_action_message(response_url, "FAILED", "(unknown)", "No such pending action — it may be old.")
+        return
+
+    if pending.status != "pending":
+        update_action_message(response_url, pending.status.upper(), pending.summary,
+                              f"Already {pending.status} — no action taken.")
+        return
+
+    if approvals.is_expired(pending):
+        approvals.decide(pending.id, "expired", user)
+        update_action_message(response_url, "EXPIRED", pending.summary,
+                              "This proposal expired before anyone approved it. Re-run the scan to propose it again.")
+        remember(f"Approval {pending.id} ({pending.kind}) expired before a decision",
+                 source="approvals", metadata={"kind": pending.kind, "id": pending.id})
+        return
+
+    if action_id == "reject_action":
+        approvals.decide(pending.id, "rejected", user)
+        update_action_message(response_url, "REJECTED", pending.summary, f"Rejected by *{user}*.")
+        remember(f"Approval {pending.id} ({pending.kind}) rejected by {user}: {pending.summary}",
+                 source="approvals", metadata={"kind": pending.kind, "id": pending.id, "user": user})
+        return
+
+    # approve_action
+    approvals.decide(pending.id, "approved", user)
+    update_action_message(response_url, "APPROVED", pending.summary, f"Approved by *{user}* — applying…")
+
+    from agent.core.fix_registry import execute
+    try:
+        result = await execute(pending.kind, pending.params, confirm=True)
+    except Exception as exc:
+        log.warning("approvals.execute_failed", id=pending.id, kind=pending.kind, error=str(exc))
+        result = {"applied": False, "message": f"error: {exc}"}
+
+    final = "APPLIED" if result.get("applied") else "FAILED"
+    approvals.decide(pending.id, final.lower(), user, result=result)
+    update_action_message(response_url, final, pending.summary,
+                          result.get("message") or f"Result: {json_dumps_short(result)}")
+    remember(f"Approval {pending.id} ({pending.kind}) approved by {user} -> {final}: {pending.summary}",
+             source="approvals", metadata={"kind": pending.kind, "id": pending.id, "user": user, "result": final})
+
+
+def json_dumps_short(d: dict, limit: int = 300) -> str:
+    import json as _json
+    s = _json.dumps({k: v for k, v in d.items() if k != "diagnosis"})
+    return s if len(s) <= limit else s[:limit] + "…"

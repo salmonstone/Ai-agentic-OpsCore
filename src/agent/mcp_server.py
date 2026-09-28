@@ -928,6 +928,30 @@ class _BearerAuthMiddleware:
         await self._app(scope, receive, send)
 
 
+class _PathDispatch:
+    """Route /webhook/* and /slack/* to the webhook receiver, everything else
+    to the bearer-gated MCP app.
+
+    Those two prefixes carry their own HMAC signature checks (GitHub's and
+    Slack's) — a second, different proof of identity than the MCP bearer
+    token — so they are exempted from that token here rather than doubly
+    protected by it. This lets Slack's button clicks and GitHub's push
+    events reach this server through the same ngrok tunnel as /mcp, instead
+    of needing a second exposed port.
+    """
+
+    def __init__(self, mcp_app, webhook_app) -> None:
+        self._mcp = mcp_app
+        self._webhook = webhook_app
+
+    async def __call__(self, scope, receive, send) -> None:
+        path = scope.get("path", "")
+        if scope["type"] == "http" and (path.startswith("/webhook/") or path.startswith("/slack/")):
+            await self._webhook(scope, receive, send)
+            return
+        await self._mcp(scope, receive, send)
+
+
 def _serve_http() -> None:
     import uvicorn
 
@@ -946,8 +970,19 @@ def _serve_http() -> None:
     port = int(os.getenv("MCP_PORT", "8000"))
 
     app = _BearerAuthMiddleware(mcp.streamable_http_app(), token)
+    try:
+        from agent.integrations.webhook import app as webhook_app
+        app = _PathDispatch(app, webhook_app)
+        webhook_mounted = True
+    except Exception as exc:
+        webhook_mounted = False
+        print(f"  (GitHub/Slack webhook receiver not mounted: {exc})")
+
     print(f"atlasos MCP — http://{host}:{port}/mcp  "
           f"(readonly={'on' if _READONLY else 'OFF — full tool set exposed'})")
+    if webhook_mounted:
+        print(f"  webhooks: http://{host}:{port}/webhook/github  and  /slack/actions "
+              "(own signature checks, not the MCP token)")
     hosts_desc = ", ".join(_ALLOWED_HOSTS) if _ALLOWED_HOSTS else "localhost only"
     print(f"  allowed hosts: {hosts_desc}")
     if not _ALLOWED_HOSTS:

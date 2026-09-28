@@ -85,6 +85,30 @@ the agent is running. Secrets (`.env`, Gmail tokens) are never included.
 weeks. `backup.bat` has the Task Scheduler command for a daily run.
 Backups are local-only for now: copy `backups/` somewhere off this disk.
 
+## Fix Approvals via Slack
+
+The six `*_apply_fix` tools (Jenkins, Kubernetes, ingress, TLS, AWS, cost)
+normally need someone at the CLI to type `y`. `agent approvals` proposes one
+to Slack instead — a real Approve/Reject message you (or anyone in that
+channel) can act on from a phone:
+
+```bash
+agent approvals test                    # sends a message that touches nothing real — prove it works first
+agent approvals propose cost_apply_fix --summary "EBS gp2->gp3 vol-0abc" -p fix_id=vol-0abc -p days=30
+agent approvals list                    # pending / approved / rejected / applied / failed
+```
+
+Tapping Approve re-runs the exact same tool ChatGPT or the CLI would call,
+with `confirm=True` — nothing is cached from when it was proposed, so it
+always acts on the current state, not a stale diagnosis. A proposal expires
+(45 min by default) rather than staying clickable indefinitely.
+
+Requires a Slack App with **Interactivity & Shortcuts** turned on, Request
+URL set to `https://<your-ngrok-host>/slack/actions` — served from the same
+port and tunnel as the MCP server, authenticated by Slack's own request
+signature rather than the MCP token. `SLACK_WEBHOOK_URL` and
+`SLACK_SIGNING_SECRET` must be set (`agent secrets status` shows where).
+
 ## What You Can Configure
 
 The `agent setup` wizard walks you through each integration:

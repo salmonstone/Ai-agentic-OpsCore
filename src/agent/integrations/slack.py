@@ -416,6 +416,101 @@ def update_deploy_message(response_url: str, status: str, deployment: str, detai
         return False
 
 
+# ---------------------------------------------------------------------------
+# Generic action approval — the *_apply_fix family, gated the same way
+# deploys are above, via agent.core.approvals / fix_registry rather than a
+# deploy-shaped PendingDeploy.
+# ---------------------------------------------------------------------------
+
+def send_action_approval_request(action) -> bool:
+    """Post a Block Kit message with Approve / Reject for a PendingAction.
+
+    `action` is an agent.core.approvals.PendingAction. Same requirements as
+    send_deploy_approval_request: a Slack App with Interactivity enabled,
+    its Request URL pointing at this server's /slack/actions.
+    """
+    url = _webhook_url()
+    if not url:
+        return False
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    param_lines = "\n".join(f"*{k}:* `{v}`" for k, v in action.params.items()) or "_none_"
+
+    blocks: list[dict] = [
+        {"type": "header", "text": {"type": "plain_text", "text": "🛠️ Fix Approval Requested"}},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{action.summary}*"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": param_lines},
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn",
+                          "text": f"Kind: `{action.kind}`  |  ID: `{action.id}`  |  Proposed: {ts}  |  "
+                                  f"Expires: {action.expires_at[:16].replace('T', ' ')} UTC"}],
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve"},
+                 "style": "primary", "action_id": "approve_action", "value": action.id},
+                {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"},
+                 "style": "danger", "action_id": "reject_action", "value": action.id},
+            ],
+        },
+        {"type": "divider"},
+    ]
+
+    payload = {
+        "text": f"🛠️ Fix approval needed — {action.summary}",
+        "attachments": [{"color": "#FFA500", "blocks": blocks}],
+    }
+
+    try:
+        r = httpx.post(url, json=payload, timeout=5)
+        r.raise_for_status()
+        log.info("slack.action_approval_sent", action_id=action.id, kind=action.kind)
+        return True
+    except Exception as exc:
+        log.warning("slack.action_approval_failed", error=str(exc))
+        return False
+
+
+def update_action_message(response_url: str, status: str, summary: str, detail: str) -> bool:
+    """Edit the approval message in place. status: APPROVED/REJECTED/APPLIED/FAILED/EXPIRED."""
+    _ST = {
+        "APPROVED": ("⏳", "#0000FF"), "REJECTED": ("🚫", "#888888"),
+        "APPLIED":  ("✅", "#00AA00"), "FAILED":   ("❌", "#FF0000"),
+        "EXPIRED":  ("⏱️", "#888888"),
+    }
+    icon, color = _ST.get(status, ("•", "#888888"))
+    try:
+        r = httpx.post(
+            response_url,
+            json={
+                "replace_original": True,
+                "text": f"{icon} Fix {status} — {summary}",
+                "attachments": [{
+                    "color": color,
+                    "blocks": [{
+                        "type": "section",
+                        "text": {"type": "mrkdwn",
+                                 "text": f"{icon} *Fix {status}* — {summary}\n{detail}"},
+                    }],
+                }],
+            },
+            timeout=5,
+        )
+        r.raise_for_status()
+        return True
+    except Exception as exc:
+        log.warning("slack.update_action_message_failed", error=str(exc))
+        return False
+
+
 def send_watch_started(namespace: str, interval: int) -> bool:
     """Send a startup message when watch begins."""
     url = _webhook_url()
