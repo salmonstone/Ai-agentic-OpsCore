@@ -14434,17 +14434,7 @@ def approvals_propose(
     Example:
       agent approvals propose cost_apply_fix --summary "EBS gp2->gp3 vol-0abc" -p fix_id=vol-0abc -p days=30
     """
-    from agent.core import approvals
-    from agent.core.fix_registry import kinds
-    from agent.integrations import slack as slack_integration
-
-    known = kinds()
-    if kind not in known:
-        _print_error(f"Unknown kind {kind!r}. Choose from: {', '.join(known)}")
-        raise typer.Exit(2)
-    if not slack_integration.is_configured():
-        _print_error("SLACK_WEBHOOK_URL is not set — nothing to send to.")
-        raise typer.Exit(1)
+    from agent.core import fix_registry
 
     params = {}
     for p in param:
@@ -14454,11 +14444,18 @@ def approvals_propose(
         k, v = p.split("=", 1)
         params[k] = v
 
-    action = approvals.create(kind=kind, summary=summary, params=params, ttl_minutes=ttl)
-    if not slack_integration.send_action_approval_request(action):
-        _print_error("Could not send the Slack message — check SLACK_WEBHOOK_URL.")
-        raise typer.Exit(1)
-    console.print(f"[green]✓ Sent to Slack.[/green] Action ID: [cyan]{action.id}[/cyan]  "
+    # Same validated path the propose_fix MCP tool uses: known kind, known
+    # params only, values converted to the fix's declared types, deduped.
+    try:
+        r = fix_registry.propose(kind, params, summary, source="CLI", ttl_minutes=ttl)
+    except fix_registry.ProposalError as e:
+        _print_error(str(e))
+        raise typer.Exit(2)
+    if r["duplicate"]:
+        console.print(f"[yellow]An identical proposal is already pending:[/yellow] [cyan]{r['id']}[/cyan] "
+                      "— not sent again.")
+        return
+    console.print(f"[green]✓ Sent to Slack.[/green] Action ID: [cyan]{r['id']}[/cyan]  "
                   f"(expires in {ttl} min)")
 
 
