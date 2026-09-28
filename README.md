@@ -118,6 +118,23 @@ port and tunnel as the MCP server, authenticated by Slack's own request
 signature rather than the MCP token. `SLACK_WEBHOOK_URL` and
 `SLACK_SIGNING_SECRET` must be set (`agent secrets status` shows where).
 
+## AWS Spend Alerts
+
+Every night at 1:03 AM the daemon checks whether the most recent day AWS has
+billing data for is a statistical outlier against your last 30 days (more
+than 1.5 standard deviations above the mean) — not just a busy day, a
+genuine spike — and Slacks you the amount and the top contributing services
+if so. Each day can only trigger this once, however many times the check
+runs.
+
+```bash
+agent daemon check-cost-anomalies          # run the check right now instead of waiting for 1:03 AM
+agent daemon check-cost-anomalies --force  # ...and alert again even if today already did
+```
+
+Read-only against Cost Explorer — safe to run any time, and a no-op if
+nothing looks unusual.
+
 ## What You Can Configure
 
 The `agent setup` wizard walks you through each integration:
