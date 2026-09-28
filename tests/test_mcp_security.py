@@ -160,6 +160,7 @@ def test_ngrok_absent_returns_empty_instead_of_raising(monkeypatch):
 # deliberately, so exposing a new mutator over the network is never silent.
 WITHHELD = {
     "jenkins_trigger_build", "jenkins_apply_fix", "k8s_apply_fix",
+    "k8s_crashloop_apply_fix",  # applies an AI-guessed patch/kubectl command
     "tls_apply_fix", "ingress_apply_fix", "aws_apply_fix", "cost_apply_fix",
     "dns_scan",            # creates a probe pod in the cluster
     "security_drift",      # writes memory snapshots

@@ -103,6 +103,15 @@ with `confirm=True` — nothing is cached from when it was proposed, so it
 always acts on the current state, not a stale diagnosis. A proposal expires
 (45 min by default) rather than staying clickable indefinitely.
 
+The autonomous daemon uses this too, but only for its riskiest step: a
+crash-looping pod always gets an immediate, automatic rolling restart (that
+part never waits — it's bounded and reversible), but if the restart alone
+doesn't recover it, the AI-guessed fix that comes next (patching the
+container's command, or another kubectl command) is proposed to Slack
+instead of applied on its own. OOM memory bumps and CPU-based autoscaling
+stay fully automatic — they're mechanical, capped adjustments, not an AI
+guess acting on a live deployment.
+
 Requires a Slack App with **Interactivity & Shortcuts** turned on, Request
 URL set to `https://<your-ngrok-host>/slack/actions` — served from the same
 port and tunnel as the MCP server, authenticated by Slack's own request

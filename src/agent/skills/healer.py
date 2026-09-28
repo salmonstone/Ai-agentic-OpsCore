@@ -104,9 +104,16 @@ def _handle_crashloop(
 ) -> dict:
     """
     Auto-fix CrashLoopBackOff:
-    1. Always try rolling restart first (safe, fixes most transient crashes).
-    2. If Claude finds a specific fix, apply it too.
-    3. After 3 failed attempts, escalate to Slack and stop retrying.
+    1. Always try a rolling restart first: bounded, mechanical, reversible,
+       fixes most transient crashes. Never waits for anyone.
+    2. If the restart alone didn't recover it, and Claude finds a specific
+       fix (patching the container's command, or another kubectl command),
+       that fix is PROPOSED to Slack for approval rather than applied
+       automatically. It's an AI guess acting on a live deployment, a
+       different risk category from the bounded restart above, so someone
+       taps Approve before it runs; see agent.core.fix_registry's
+       "k8s_crashloop_apply_fix" entry for what actually applies it.
+    3. After 3 failed attempts, escalate to Slack/PagerDuty and stop retrying.
     """
     key = f"{namespace}/{pod_name}/crashloop"
     result = {"action": "heal_crashloop", "detected": True, "skipped": False,
@@ -180,78 +187,157 @@ def _handle_crashloop(
     log.info("healer.crashloop.restart",
              pod=pod_name, ns=namespace, ok=restart_result.success)
 
-    # ── Step 2: Get logs + exit code ──────────────────────────────────────
+    # ── Step 2: Did the restart alone fix it? ───────────────────────────────
+    recovered = _verify_running(pod_name, namespace, wait_s=60)
+    daemon_db.set_cooldown(key)
+
+    if recovered:
+        daemon_db.log_action(
+            "pod_heal", "crashloop: rolling restart", pod_name, namespace,
+            before_state={"restart_count": restart_count},
+            after_state={"recovered": True},
+            success=bool(restart_result.success),
+            note="recovered from restart alone",
+        )
+        if inc_id:
+            try:
+                from agent.skills.incident import add_fix_attempt as _add_fix_attempt
+                from agent.skills.incident import resolve_incident as _resolve_incident
+                _add_fix_attempt(inc_id, "rolling restart", True)
+                _resolve_incident(inc_id)
+            except Exception as exc:
+                log.warning("healer.incident_update_failed", error=str(exc))
+        _notify(
+            "CrashLoopBackOff fixed",
+            f"✅ Auto-fixed `{pod_name}` in `{namespace}` with a rolling restart.",
+            pod_name, namespace, severity="info",
+        )
+        result["fixed"] = True
+        result["recovered"] = True
+        result["cause"] = "transient — resolved by restart"
+        return result
+
+    # ── Step 3: Restart alone wasn't enough. Look for a specific fix, but
+    # PROPOSE it rather than apply it — an AI-guessed command patch or
+    # kubectl command is a different risk category from the mechanical
+    # restart above, so it waits for a human to tap Approve in Slack. ──────
     logs      = _get_previous_logs(pod_name, namespace, container_name)
     exit_code = _get_exit_code(pod_name, namespace)
     command   = _get_container_command(deployment, namespace)
 
-    # ── Step 3: Detect command-level crash (exit 1, wrong command, etc.) ──
-    specific_applied = False
     cause = "Unknown"
-    fix_cmd = "ESCALATE"
+    fix_kind: str | None = None
+    fix_value = ""
 
     if _is_command_crash(exit_code, command):
         log.info("healer.command_crash_detected",
                  pod=pod_name, exit_code=exit_code, command=command)
         cause, new_cmd = _diagnose_command_crash(deployment, namespace, command, logs)
-        if new_cmd:
-            patched = _patch_deployment_command(deployment, namespace, new_cmd)
-            specific_applied = patched
-            fix_cmd = f"patch command → {new_cmd}"
-            log.info("healer.command_patch_applied",
-                     deployment=deployment, new_command=new_cmd, ok=patched)
+        if new_cmd and _is_safe_command(" ".join(new_cmd)):
+            fix_kind, fix_value = "patch_command", json.dumps(new_cmd)
     else:
-        # Ask Claude for a more specific fix
         cause, fix_cmd = _diagnose_crashloop(pod_name, logs)
         if fix_cmd.upper() != "ESCALATE" and _is_safe_command(fix_cmd):
-            specific_applied = run_kubectl(fix_cmd.split()).success
+            fix_kind, fix_value = "kubectl", fix_cmd
 
-    # ── Step 4: Wait and verify ────────────────────────────────────────────
-    recovered = _verify_running(pod_name, namespace, wait_s=60)
-
-    daemon_db.set_cooldown(key)
     daemon_db.log_action(
         "pod_heal",
-        f"crashloop: rolling restart + {fix_cmd if specific_applied else 'no extra fix'}",
+        "crashloop: restart alone insufficient; "
+        + (f"proposed {fix_kind} for approval" if fix_kind else "no safe fix found"),
         pod_name, namespace,
         before_state={"restart_count": restart_count},
-        after_state={"recovered": recovered, "cause": cause},
+        after_state={"recovered": False, "cause": cause},
         success=bool(restart_result.success),
         note=cause,
     )
 
+    if fix_kind:
+        try:
+            from agent.core import approvals
+            from agent.integrations import slack as slack_integration
+
+            action = approvals.create(
+                kind="k8s_crashloop_apply_fix",
+                summary=f"Crashloop fix for {pod_name} ({namespace}): {cause}",
+                params={
+                    "pod_name": pod_name, "namespace": namespace,
+                    "deployment": deployment, "container_name": container_name,
+                    "fix_kind": fix_kind, "fix_value": fix_value,
+                    "restart_count": restart_count, "inc_id": inc_id,
+                },
+            )
+            if not slack_integration.send_action_approval_request(action):
+                raise RuntimeError("Slack not configured or the request failed")
+            if inc_id:
+                from agent.skills.incident import add_fix_attempt as _add_fix_attempt
+                _add_fix_attempt(inc_id, f"proposed for approval: {fix_kind}", False)
+        except Exception as exc:
+            log.warning("healer.crashloop.propose_failed", error=str(exc))
+            _notify(
+                "CrashLoopBackOff — fix attempted",
+                f"⚠️ Restarted `{pod_name}` in `{namespace}` but it's still crashing.\n"
+                f"Cause: {cause}\nA fix was found but couldn't be sent to Slack for "
+                f"approval ({exc}) — run: agent k8s diagnose {pod_name} -n {namespace}",
+                pod_name, namespace, severity="warning",
+            )
+    else:
+        _notify(
+            "CrashLoopBackOff — fix attempted",
+            f"⚠️ Restarted `{pod_name}` in `{namespace}` "
+            f"(attempt {fix_count + 1}/{_MAX_FIXES_BEFORE_ESCALATE})\n"
+            f"Cause: {cause}\nStill not recovered, no safe automated fix found — "
+            f"will retry in 30 min.",
+            pod_name, namespace, severity="warning",
+        )
+
+    result["fixed"] = bool(restart_result.success)
+    result["recovered"] = False
+    result["cause"] = cause
+    result["proposed"] = bool(fix_kind)
+    return result
+
+
+def apply_crashloop_fix(
+    pod_name: str,
+    namespace: str,
+    deployment: str,
+    container_name: str,
+    fix_kind: str,
+    fix_value: str,
+    restart_count: int = 0,
+    inc_id: str = "",
+) -> dict:
+    """Apply a crashloop fix _handle_crashloop proposed, once a human has
+    approved it in Slack. Never called by the daemon directly — only via
+    the k8s_crashloop_apply_fix MCP tool with confirm=True, the same
+    confirm-gated path the CLI and ChatGPT would use for any other fix."""
+    if fix_kind == "patch_command":
+        new_cmd = json.loads(fix_value)
+        applied = _patch_deployment_command(deployment, namespace, new_cmd)
+        fix_desc = f"patch command → {new_cmd}"
+    elif fix_kind == "kubectl":
+        applied = run_kubectl(fix_value.split()).success
+        fix_desc = fix_value
+    else:
+        return {"applied": False, "message": f"Unknown fix_kind: {fix_kind!r}"}
+
+    recovered = _verify_running(pod_name, namespace, wait_s=60)
+    daemon_db.log_action(
+        "pod_heal", f"crashloop: approved fix — {fix_desc}", pod_name, namespace,
+        before_state={"restart_count": restart_count},
+        after_state={"recovered": recovered},
+        success=applied, note="applied after Slack approval",
+    )
     if inc_id:
         try:
             from agent.skills.incident import add_fix_attempt as _add_fix_attempt
-            _add_fix_attempt(inc_id, f"rolling restart + {fix_cmd}", recovered)
+            _add_fix_attempt(inc_id, f"approved fix: {fix_desc}", recovered)
             if recovered:
                 from agent.skills.incident import resolve_incident as _resolve_incident
                 _resolve_incident(inc_id)
         except Exception as exc:
             log.warning("healer.incident_update_failed", error=str(exc))
-
-    if recovered:
-        _notify(
-            "CrashLoopBackOff fixed",
-            f"✅ Auto-fixed `{pod_name}` in `{namespace}`\n"
-            f"Cause: {cause}\n"
-            f"Fix: rolling restart"
-            + (f" + {fix_cmd}" if specific_applied else ""),
-            pod_name, namespace, severity="info",
-        )
-    else:
-        _notify(
-            "CrashLoopBackOff — fix attempted",
-            f"⚠️ Attempted fix on `{pod_name}` in `{namespace}` "
-            f"(attempt {fix_count + 1}/{_MAX_FIXES_BEFORE_ESCALATE})\n"
-            f"Cause: {cause}\nStill not recovered — will retry in 30 min.",
-            pod_name, namespace, severity="warning",
-        )
-
-    result["fixed"] = bool(restart_result.success)
-    result["recovered"] = recovered
-    result["cause"] = cause
-    return result
+    return {"applied": applied, "recovered": recovered, "fix": fix_desc}
 
 
 def _get_previous_logs(pod: str, ns: str, container: str) -> str:
