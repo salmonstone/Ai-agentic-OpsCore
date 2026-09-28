@@ -191,6 +191,164 @@ async def github_webhook(
 
 
 # ---------------------------------------------------------------------------
+# Jenkins build-failure hook — diagnose automatically, post to Slack, and
+# offer the fix as an Approve/Reject proposal when it can be automated.
+#
+# Jenkins side (a Jenkinsfile `post { failure { ... } }` step, or the
+# Notification plugin) POSTs here with the shared JENKINS_WEBHOOK_SECRET in
+# an X-AtlasOS-Token header or a ?token= query param. Fails closed: with no
+# secret configured, every request is rejected.
+# ---------------------------------------------------------------------------
+
+def _jenkins_secret() -> str:
+    import os
+    return os.environ.get("JENKINS_WEBHOOK_SECRET", "").strip()
+
+
+def _verify_jenkins_token(presented: str) -> bool:
+    secret = _jenkins_secret()
+    if not secret or not presented:
+        return False
+    return hmac.compare_digest(presented.encode(), secret.encode())
+
+
+def parse_jenkins_event(payload: dict) -> tuple[str, int, str] | None:
+    """(job, build_number, status) from either payload shape we accept:
+
+    - simple:  {"job": "api/main", "build": 42, "status": "FAILURE"}
+    - Jenkins Notification plugin:
+               {"name": "api", "build": {"number": 42, "phase": "COMPLETED", "status": "FAILURE"}}
+
+    Returns None for anything else, including the plugin's STARTED phase
+    (no result yet).
+    """
+    if not isinstance(payload, dict):
+        return None
+    job = payload.get("job") or payload.get("name")
+    build = payload.get("build")
+    status = payload.get("status")
+    if isinstance(build, dict):
+        if str(build.get("phase", "")).upper() == "STARTED":
+            return None
+        status = build.get("status", status)
+        build = build.get("number")
+    try:
+        number = int(build)
+    except (TypeError, ValueError):
+        return None
+    if not job or not isinstance(job, str) or not status:
+        return None
+    return job.strip(), number, str(status).strip().upper()
+
+
+@app.post("/webhook/jenkins")
+async def jenkins_webhook(
+    request: Request,
+    x_atlasos_token: str | None = Header(default=None),
+) -> Response:
+    token = x_atlasos_token or request.query_params.get("token", "")
+    if not _verify_jenkins_token(token):
+        log.warning("jenkins_webhook.unauthorized")
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    event = parse_jenkins_event(payload)
+    if event is None:
+        return Response(content="ignored: not a build result", status_code=200)
+    job, number, status = event
+    if status != "FAILURE":
+        return Response(content=f"ignored: status {status}", status_code=200)
+
+    # Each job+build is handled once. Jenkins can report the same build more
+    # than once (the Notification plugin sends COMPLETED then FINALIZED), and
+    # a retried POST must not produce a second Slack message. Checked and
+    # marked with no `await` in between, so two near-simultaneous requests on
+    # this event loop can't both pass.
+    if not _claim_jenkins_build(job, number):
+        return Response(content="duplicate: already handled", status_code=200)
+
+    # Diagnosis takes a while (log fetch + AI); Jenkins must not wait on it.
+    import asyncio
+    asyncio.create_task(_handle_jenkins_failure(job, number))
+    log.info("jenkins_webhook.accepted", job=job, build=number)
+    return Response(content="accepted", status_code=202)
+
+
+def _claim_jenkins_build(job: str, number: int) -> bool:
+    """True the first time a job+build is seen (within 7 days), else False."""
+    from agent.integrations import daemon_db
+
+    key = f"jenkins_failure/{job}#{number}"
+    try:
+        if daemon_db.check_cooldown(key, cooldown_minutes=7 * 24 * 60):
+            return False
+        daemon_db.set_cooldown(key)
+    except Exception as exc:
+        log.warning("jenkins_webhook.dedupe_failed", error=str(exc))
+    return True
+
+
+async def _handle_jenkins_failure(job: str, number: int) -> dict:
+    """Diagnose one failed build and tell Slack. Never raises."""
+    import asyncio
+
+    from agent.integrations.slack import send_alert_generic
+
+    try:
+        from agent.mcp_server import jenkins_diagnose
+        diag = await jenkins_diagnose(job, number)
+    except Exception as exc:
+        log.warning("jenkins_webhook.diagnose_failed", job=job, build=number, error=str(exc))
+        send_alert_generic(
+            title="Jenkins build failed",
+            message=f"❌ `{job}` #{number} failed, but AtlasOS couldn't diagnose it: {str(exc)[:200]}\n"
+                    f"Try: agent jenkins diagnose {job} --build {number}",
+            severity="warning",
+            fields={"Job": job, "Build": str(number)},
+        )
+        return {"handled": True, "diagnosed": False}
+
+    root = (diag.get("root_cause") or "unknown").strip()
+    raw_action = diag.get("fix_action", "MANUAL_ONLY")
+    action = str(getattr(raw_action, "value", raw_action))   # enum -> "RETRIGGER" etc.
+    try:
+        from agent.memory.retrieval import remember
+        remember(f"Jenkins {job} #{number} failed: {root} (suggested: {action})",
+                 source="jenkins", metadata={"job": job, "build": number, "fix_action": action})
+    except Exception:
+        pass
+
+    if action != "MANUAL_ONLY":
+        from agent.core import fix_registry
+        summary = f"Jenkins {job} #{number} failed: {root} — suggested fix: {action}"
+        try:
+            r = await asyncio.to_thread(
+                fix_registry.propose, "jenkins_apply_fix",
+                {"job_name": job, "build_number": number}, summary,
+                "Jenkins failure hook", True,
+            )
+            return {"handled": True, "diagnosed": True, "proposed": True, "approval_id": r["id"]}
+        except fix_registry.ProposalError as exc:
+            log.warning("jenkins_webhook.propose_failed", error=str(exc))
+            # fall through to a plain alert so the diagnosis isn't lost
+
+    send_alert_generic(
+        title="Jenkins build failed",
+        message=(f"❌ `{job}` #{number} failed.\n*Cause:* {root}\n"
+                 f"{diag.get('explanation', '')}\n"
+                 + ("*Needs a manual fix.*" if action == "MANUAL_ONLY" else f"*Suggested fix:* {action}")
+                 + (f"\n*Prevention:* {diag['prevention']}" if diag.get("prevention") else "")),
+        severity="warning",
+        fields={"Job": job, "Build": str(number), "Confidence": str(diag.get("confidence", ""))},
+    )
+    return {"handled": True, "diagnosed": True, "proposed": False}
+
+
+# ---------------------------------------------------------------------------
 # Slack Interactive Components — button approve / reject
 # ---------------------------------------------------------------------------
 
