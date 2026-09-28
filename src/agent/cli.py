@@ -26,6 +26,7 @@ load_dotenv()
 
 import json
 import sys
+import uuid
 import time
 from datetime import datetime
 from pathlib import Path
@@ -320,6 +321,12 @@ secrets_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(secrets_app, name="secrets")
+
+approvals_app = typer.Typer(
+    help="Propose a fix for Slack approval instead of confirming it locally.",
+    no_args_is_help=True,
+)
+app.add_typer(approvals_app, name="approvals")
 
 console = Console()
 
@@ -14275,6 +14282,111 @@ def secrets_run(ctx: typer.Context) -> None:
         raise typer.Exit(2)
     # agent/__init__ already copied keychain values into os.environ.
     raise typer.Exit(subprocess.call(ctx.args))
+
+
+# ---------------------------------------------------------------------------
+# Commands: agent approvals list / test / propose
+# ---------------------------------------------------------------------------
+
+@approvals_app.command("list")
+def approvals_list(
+    status: str = typer.Option("", "--status", help="Filter: pending, approved, rejected, applied, failed, expired."),
+    limit:  int  = typer.Option(20, "--limit"),
+) -> None:
+    """Show fixes proposed for Slack approval, newest first."""
+    from agent.core import approvals
+    approvals.expire_stale()
+    rows = approvals.list_actions(status=status or None, limit=limit)
+    if not rows:
+        console.print("[yellow]No pending actions.[/yellow] Propose one: [cyan]agent approvals test[/cyan]")
+        return
+    t = Table(box=None, padding=(0, 2))
+    for col in ("ID", "Kind", "Status", "Summary", "Proposed"):
+        t.add_column(col)
+    colors = {"pending": "yellow", "approved": "cyan", "applied": "green",
+              "rejected": "dim", "failed": "red", "expired": "dim"}
+    for a in rows:
+        t.add_row(a.id, a.kind, f"[{colors.get(a.status, 'white')}]{a.status}[/]",
+                  _escape(a.summary[:60]), a.created_at[:16].replace("T", " "))
+    console.print(t)
+
+
+@approvals_app.command("test")
+def approvals_test() -> None:
+    """Send a real Slack approval message that does nothing to real
+    infrastructure — for proving the whole pipeline works end to end before
+    trusting it with a real fix."""
+    from agent.core import approvals
+    from agent.integrations import slack as slack_integration
+
+    if not slack_integration.is_configured():
+        _print_error("SLACK_WEBHOOK_URL is not set — nothing to send to.")
+        raise typer.Exit(1)
+
+    marker = uuid.uuid4().hex[:8]
+    action = approvals.create(
+        kind="test",
+        summary=f"Test action (marker {marker}) — safe, touches nothing real",
+        params={"marker": marker},
+        ttl_minutes=45,
+    )
+    if not slack_integration.send_action_approval_request(action):
+        _print_error("Could not send the Slack message — check SLACK_WEBHOOK_URL.")
+        raise typer.Exit(1)
+
+    console.print(f"[green]✓ Sent to Slack.[/green] Action ID: [cyan]{action.id}[/cyan]")
+    console.print("  Open Slack and tap [bold]Approve[/bold] or [bold]Reject[/bold] on the message.")
+    console.print(f"  Then check:  [cyan]agent approvals list[/cyan]  (look for id {action.id})")
+    console.print("  [dim]Requires Slack App → Interactivity & Shortcuts → Request URL set to "
+                  "https://<your-ngrok-host>/slack/actions[/dim]")
+
+
+@approvals_app.command("propose")
+def approvals_propose(
+    kind:    str       = typer.Argument(..., help="Fix kind — see: agent approvals kinds"),
+    summary: str      = typer.Option(..., "--summary", help="Plain-English description shown in Slack."),
+    param:   list[str] = typer.Option([], "--param", "-p", help="key=value, repeatable — the fix's arguments."),
+    ttl:     int      = typer.Option(45, "--ttl-minutes"),
+) -> None:
+    """Propose any registered fix for Slack approval instead of confirming locally.
+
+    Example:
+      agent approvals propose cost_apply_fix --summary "EBS gp2->gp3 vol-0abc" -p fix_id=vol-0abc -p days=30
+    """
+    from agent.core import approvals
+    from agent.core.fix_registry import kinds
+    from agent.integrations import slack as slack_integration
+
+    known = kinds()
+    if kind not in known:
+        _print_error(f"Unknown kind {kind!r}. Choose from: {', '.join(known)}")
+        raise typer.Exit(2)
+    if not slack_integration.is_configured():
+        _print_error("SLACK_WEBHOOK_URL is not set — nothing to send to.")
+        raise typer.Exit(1)
+
+    params = {}
+    for p in param:
+        if "=" not in p:
+            _print_error(f"--param must be key=value, got: {p!r}")
+            raise typer.Exit(2)
+        k, v = p.split("=", 1)
+        params[k] = v
+
+    action = approvals.create(kind=kind, summary=summary, params=params, ttl_minutes=ttl)
+    if not slack_integration.send_action_approval_request(action):
+        _print_error("Could not send the Slack message — check SLACK_WEBHOOK_URL.")
+        raise typer.Exit(1)
+    console.print(f"[green]✓ Sent to Slack.[/green] Action ID: [cyan]{action.id}[/cyan]  "
+                  f"(expires in {ttl} min)")
+
+
+@approvals_app.command("kinds")
+def approvals_kinds() -> None:
+    """List the fix kinds that can be proposed."""
+    from agent.core.fix_registry import kinds
+    for k in kinds():
+        console.print(f"  [cyan]{k}[/cyan]")
 
 
 # ---------------------------------------------------------------------------
