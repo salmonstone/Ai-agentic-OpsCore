@@ -20,6 +20,14 @@ from agent.skills import healer
 CPU_HIGH_PCT = 85.0
 MEM_HIGH_PCT = 90.0
 KUBE_SYSTEM_GRACE_SECONDS = 600  # 10 minutes
+NIGHTLY_HOUR = 1                  # nightly checks run at the first poll at/after 1 AM local
+
+
+def nightly_due(now: datetime, done_date: str | None) -> bool:
+    """True if the nightly checks should run at `now`: it's NIGHTLY_HOUR or
+    later, and they haven't already run on this calendar day. A laptop asleep
+    at 1 AM runs them when it wakes rather than skipping the day."""
+    return now.hour >= NIGHTLY_HOUR and now.strftime("%Y-%m-%d") != done_date
 
 
 class HealingDaemon:
@@ -223,16 +231,39 @@ class HealingDaemon:
     def _cost_watcher(self) -> None:
         while self.running:
             try:
-                now = datetime.now()
-                today = now.strftime("%Y-%m-%d")
-                if now.hour == 1 and now.minute == 3 and self._cost_done_date != today:
-                    self._run_cost_fixes()
-                    self._check_spend_anomalies()
-                    self._check_rds_capacity()
-                    self._cost_done_date = today
+                self._run_nightly_if_due(datetime.now())
             except Exception as exc:
                 self.log.error("daemon.cost_watcher.error", error=str(exc))
             self._sleep(600)  # check every 10 minutes
+
+    def _run_nightly_if_due(self, now: datetime) -> bool:
+        """Run the nightly checks at most once per calendar day, at the first
+        poll at or after NIGHTLY_HOUR — not only at one exact minute.
+
+        The old trigger required `hour == 1 and minute == 3`, but this loop
+        polls every 10 minutes, so it fired only when a poll happened to land
+        on that one minute (about 1 night in 10), and never if the laptop was
+        asleep then. "Done today" also lived only in memory, so restarting the
+        daemon re-ran everything. It is now recorded in daemon_db, which
+        survives restarts.
+        """
+        from agent.integrations import daemon_db
+
+        today = now.strftime("%Y-%m-%d")
+        if not nightly_due(now, self._cost_done_date):
+            return False
+        key = f"nightly_checks/{today}"
+        if daemon_db.check_cooldown(key, cooldown_minutes=24 * 60):
+            self._cost_done_date = today      # ran earlier today, before a restart
+            return False
+
+        # Mark first: a crash partway through must not retry every 10 minutes.
+        daemon_db.set_cooldown(key)
+        self._cost_done_date = today
+        self._run_cost_fixes()
+        self._check_spend_anomalies()
+        self._check_rds_capacity()
+        return True
 
     def _run_cost_fixes(self) -> int:
         from agent.integrations import daemon_db
