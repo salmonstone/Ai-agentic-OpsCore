@@ -5,6 +5,7 @@ tests exercise real process start, exit detection and termination, while the
 clock is simulated so backoff timing is exact and the suite stays fast.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -309,3 +310,75 @@ def test_ngrok_hosts_only_counts_tunnels_to_our_port(monkeypatch):
     monkeypatch.setattr(sv, "MCP_PORT", 8000)
     monkeypatch.setattr(sv.urllib.request, "urlopen", lambda *a, **k: R(json.dumps(payload).encode()))
     assert sv.ngrok_hosts() == ["mine.ngrok-free.dev"]
+
+
+# --- resilience of the tick loop itself ------------------------------------
+
+def test_replace_atomic_retries_then_succeeds(base, monkeypatch):
+    calls = {"n": 0}
+    real_replace = sv.os.replace
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(5, "Access is denied")
+        return real_replace(src, dst)
+    monkeypatch.setattr(sv.os, "replace", flaky)
+    monkeypatch.setattr(sv.time, "sleep", lambda s: None)   # no real waiting in a test
+
+    path = base / "data" / "supervisor.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text("{}", encoding="utf-8")
+    assert sv._replace_atomic(tmp, path) is True
+    assert calls["n"] == 3 and path.read_text() == "{}"
+
+
+def test_replace_atomic_gives_up_cleanly_after_persistent_failure(base, monkeypatch):
+    monkeypatch.setattr(sv.os, "replace",
+                        lambda s, d: (_ for _ in ()).throw(PermissionError(5, "denied")))
+    monkeypatch.setattr(sv.time, "sleep", lambda s: None)
+    path = base / "data" / "supervisor.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text("{}", encoding="utf-8")
+    assert sv._replace_atomic(tmp, path, attempts=3) is False
+    assert not tmp.exists() and not path.exists()   # no leftover .tmp file
+
+
+def test_a_state_write_that_keeps_failing_does_not_crash_the_run_loop(base, cleanup, monkeypatch):
+    # Reproduces the live failure: os.replace onto supervisor.json raises
+    # PermissionError on every attempt (as Defender/indexer scanning would),
+    # so _replace_atomic always returns False, not raises — but even a
+    # write_state that DID raise must not take the loop down, per the
+    # try/except in run(). Assert on that stronger guarantee directly.
+    sup = make(base, [ServiceSpec("svc", command=lambda: SLEEP)])
+    cleanup(sup)
+
+    def boom():
+        raise PermissionError(5, "Access is denied")
+    monkeypatch.setattr(sup, "write_state", boom)
+    sup.tick = 0.05
+    import threading
+    t = threading.Thread(target=sup.run, kwargs={"max_seconds": 0.6})
+    t.start()
+    t.join(10)
+    assert not t.is_alive()                       # run() returned on its own (deadline), not via crash
+    assert sup.services[0].proc is not None or sup.services[0].state == "stopped"
+
+
+def test_write_state_survives_a_transient_lock_on_the_destination_file(base, cleanup):
+    # A real cross-process lock: another handle has supervisor.json open for
+    # reading without delete-sharing, which is what os.replace needs on
+    # Windows. write_state must not raise; the retry (or graceful give-up)
+    # in _replace_atomic must absorb it.
+    if os.name != "nt":
+        pytest.skip("Windows-specific file locking semantics")
+    sup = make(base, [ServiceSpec("svc", command=lambda: SLEEP)])
+    cleanup(sup)
+    sup.write_state()
+    path = base / "data" / "supervisor.json"
+    fd = os.open(str(path), os.O_RDONLY)   # no FILE_SHARE_DELETE via the low-level API
+    try:
+        sup.write_state()                   # must not raise
+    finally:
+        os.close(fd)
+    assert path.exists()
