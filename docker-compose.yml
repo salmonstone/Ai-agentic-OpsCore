@@ -27,6 +27,22 @@ services:
       # ngrok runs on the host, not in here — auto-detect the tunnel hostname
       # through the host gateway. Set MCP_ALLOWED_HOSTS in .env to pin it instead.
       NGROK_API_URL: http://host.docker.internal:4040
+      # Secrets, passed through from the host environment when set there —
+      # which is how they arrive once moved out of .env into the OS keychain
+      # (a container can't read the host keychain):
+      #   agent secrets run -- docker compose up -d
+      # When unset in the host environment, the .env value (if any) applies.
+      MCP_AUTH_TOKEN:
+      ANTHROPIC_API_KEY:
+      VOYAGE_API_KEY:
+      JENKINS_API_TOKEN:
+      AWS_ACCESS_KEY_ID:
+      AWS_SECRET_ACCESS_KEY:
+      SLACK_WEBHOOK_URL:
+      SLACK_SIGNING_SECRET:
+      GITHUB_WEBHOOK_SECRET:
+      PAGERDUTY_ROUTING_KEY:
+      OPSGENIE_API_KEY:
 
     # Published on the host's loopback only: reachable by ngrok on this machine,
     # not by anything else on the network.

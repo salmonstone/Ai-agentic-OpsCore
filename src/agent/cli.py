@@ -315,6 +315,12 @@ supervise_app = typer.Typer(
 )
 app.add_typer(supervise_app, name="supervise")
 
+secrets_app = typer.Typer(
+    help="Keep API keys and tokens in the OS keychain instead of plaintext .env.",
+    no_args_is_help=True,
+)
+app.add_typer(secrets_app, name="secrets")
+
 console = Console()
 
 # ---------------------------------------------------------------------------
@@ -13849,12 +13855,12 @@ def events_enqueue(
 # Commands: agent backup create / list / verify / restore
 # ---------------------------------------------------------------------------
 
-def _audit_backup(content: str, **metadata) -> None:
+def _audit_backup(content: str, source: str = "backup", **metadata) -> None:
     """Record a backup/restore in the audit trail without failing the command
     if memory is unavailable — the archive itself is the thing that matters."""
     try:
         from agent.memory.retrieval import remember
-        remember(content, source="backup", metadata=metadata)
+        remember(content, source=source, metadata=metadata)
     except Exception as exc:
         console.print(f"[dim]  (audit trail not updated: {_escape(str(exc)[:120])})[/dim]")
 
@@ -14111,6 +14117,164 @@ def supervise_logs(
     console.print(Rule(f"[bold cyan]{_escape(str(path))}[/bold cyan]"))
     for line in lines:
         console.print(_escape(line), highlight=False)
+
+
+# ---------------------------------------------------------------------------
+# Commands: agent secrets status / migrate / set / unset / restore-env / run
+# ---------------------------------------------------------------------------
+# Values are never printed, logged, or written to the audit trail — only names.
+
+_ENV_PATH = Path(".env")
+
+
+def _secrets_backend_or_exit():
+    from agent.core import secrets as sec
+    if not sec.available():
+        _print_error("No OS keychain is available here (e.g. inside a Linux container). "
+                     "Provide secrets as environment variables instead.")
+        raise typer.Exit(1)
+    return sec
+
+
+@secrets_app.command("status")
+def secrets_status() -> None:
+    """Show where each secret lives: keychain or plaintext .env."""
+    from agent.core import secrets as sec
+    in_keychain = set(sec.stored_names())
+    in_env_file = set(sec.env_secret_names(_ENV_PATH))
+    names = sorted(in_keychain | in_env_file)
+    console.print(f"[dim]Keychain backend: {sec.backend_name()}[/dim]")
+    if not names:
+        console.print("[yellow]No secrets found in the keychain or .env.[/yellow]")
+        return
+    t = Table(box=None, padding=(0, 2))
+    t.add_column("Secret", style="cyan")
+    t.add_column("Stored in")
+    t.add_column("")
+    for n in names:
+        if n in in_keychain and n in in_env_file:
+            where, note = "[green]keychain[/green] + [red].env[/red]", "[red]plaintext copy still in .env[/red]"
+        elif n in in_keychain:
+            where, note = "[green]keychain[/green]", ""
+        else:
+            where, note = "[red].env (plaintext)[/red]", "run: agent secrets migrate"
+        t.add_row(n, where, note)
+    console.print(t)
+    if in_env_file:
+        console.print(f"[yellow]{len(in_env_file)} secret(s) still in plaintext .env.[/yellow] "
+                      f"Move them: [cyan]agent secrets migrate[/cyan]")
+    else:
+        console.print("[green]✓ No secrets in plaintext .env.[/green]")
+
+
+@secrets_app.command("migrate")
+def secrets_migrate(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Move every secret in .env into the OS keychain and strip it from .env."""
+    sec = _secrets_backend_or_exit()
+    names = sec.env_secret_names(_ENV_PATH)
+    if not names:
+        console.print("[green]✓ Nothing to migrate: no secrets in .env.[/green]")
+        return
+    console.print(f"[bold]Move {len(names)} secret(s) from .env to {sec.backend_name()}:[/bold]")
+    for n in names:
+        console.print(f"  • {n}")
+    console.print("[dim]Each value is stored and read back before .env is changed; in .env the line "
+                  "becomes a comment. Undo any time: agent secrets restore-env[/dim]")
+    if not yes and not typer.confirm("Proceed?", default=False):
+        console.print("[dim]Cancelled — nothing changed.[/dim]")
+        raise typer.Exit(0)
+    try:
+        moved = sec.migrate(_ENV_PATH)
+    except (sec.SecretsError, OSError) as e:
+        _print_error(f"Migration stopped, .env unchanged: {e}")
+        raise typer.Exit(1)
+    console.print(f"[green]✓ Moved {len(moved)} secret(s) to the keychain; "
+                  f".env no longer contains them.[/green]")
+    console.print("[dim]Restart running AtlasOS processes: agent supervise stop, then start-atlasos.bat[/dim]")
+    _audit_backup(source="secrets", content=f"Secrets migrated from .env to the OS keychain: {', '.join(moved)}",
+                  names=", ".join(moved))
+
+
+@secrets_app.command("set")
+def secrets_set(
+    name: str = typer.Argument(..., help="Variable name, e.g. JENKINS_API_TOKEN."),
+    generate: bool = typer.Option(False, "--generate",
+                                  help="Generate a random token (e.g. to rotate MCP_AUTH_TOKEN)."),
+) -> None:
+    """Store or replace one secret (typed hidden, or generated)."""
+    sec = _secrets_backend_or_exit()
+    if generate:
+        value = sec.generate_token()
+    else:
+        value = typer.prompt(f"Value for {name}", hide_input=True, confirmation_prompt=True)
+    try:
+        sec.store(name, value)
+    except (sec.SecretsError, OSError) as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+    console.print(f"[green]✓ {name} stored in {sec.backend_name()}.[/green]")
+    if generate:
+        # Shown exactly once so it can be pasted into the client (e.g. the
+        # ChatGPT connector URL). It is not written anywhere in plaintext.
+        console.print(f"  New value (shown once): [bold]{value}[/bold]")
+    if name in sec.env_secret_names(_ENV_PATH):
+        console.print(f"[yellow]  .env still has a plaintext {name}; the keychain value now wins. "
+                      f"Run agent secrets migrate to remove it.[/yellow]")
+    console.print("[dim]  Running processes keep the old value until restarted "
+                  "(agent supervise stop, then start-atlasos.bat).[/dim]")
+    _audit_backup(source="secrets", content=f"Secret {name} {'rotated (generated)' if generate else 'set'} in the OS keychain",
+                  name=name)
+
+
+@secrets_app.command("unset")
+def secrets_unset(
+    name: str = typer.Argument(..., help="Variable name to remove from the keychain."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Delete one secret from the keychain."""
+    sec = _secrets_backend_or_exit()
+    if not yes and not typer.confirm(f"Delete {name} from the keychain?", default=False):
+        raise typer.Exit(0)
+    existed = sec.delete(name)
+    console.print(f"[green]✓ {name} removed.[/green]" if existed else f"[yellow]{name} was not stored.[/yellow]")
+    if existed:
+        _audit_backup(source="secrets", content=f"Secret {name} deleted from the OS keychain", name=name)
+
+
+@secrets_app.command("restore-env")
+def secrets_restore_env(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Undo migrate: write keychain secrets back into .env as plaintext."""
+    sec = _secrets_backend_or_exit()
+    names = sec.stored_names()
+    if not names:
+        console.print("[yellow]No secrets in the keychain.[/yellow]")
+        return
+    console.print(f"[bold]Write {len(names)} secret(s) back into plaintext .env:[/bold] {', '.join(names)}")
+    if not yes and not typer.confirm("Proceed?", default=False):
+        raise typer.Exit(0)
+    restored = sec.restore_to_env(_ENV_PATH)
+    console.print(f"[green]✓ Restored {len(restored)} secret(s) to .env and removed them "
+                  f"from the keychain.[/green]")
+    _audit_backup(source="secrets", content=f"Secrets restored from the keychain to plaintext .env: {', '.join(restored)}",
+                  names=", ".join(restored))
+
+
+@secrets_app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def secrets_run(ctx: typer.Context) -> None:
+    """Run a command with keychain secrets in its environment.
+
+    Example:  agent secrets run -- docker compose up -d
+    """
+    import subprocess
+    if not ctx.args:
+        _print_error("Usage: agent secrets run -- <command> [args...]")
+        raise typer.Exit(2)
+    # agent/__init__ already copied keychain values into os.environ.
+    raise typer.Exit(subprocess.call(ctx.args))
 
 
 # ---------------------------------------------------------------------------
