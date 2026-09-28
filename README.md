@@ -131,6 +131,40 @@ port and tunnel as the MCP server, authenticated by Slack's own request
 signature rather than the MCP token. `SLACK_WEBHOOK_URL` and
 `SLACK_SIGNING_SECRET` must be set (`agent secrets status` shows where).
 
+## Jenkins Failure Hook
+
+When a Jenkins build fails, Jenkins can tell AtlasOS directly. AtlasOS runs
+the same diagnosis as `agent jenkins diagnose` and posts the cause to Slack.
+If the fix can be automated (retrigger, restart agent, clear workspace), the
+message is an Approve/Reject proposal. If not, it's an alert explaining why a
+human is needed. Each build is reported once, even if Jenkins sends it twice.
+
+One-time setup:
+
+```bash
+agent secrets set JENKINS_WEBHOOK_SECRET --generate   # shared secret; restart AtlasOS afterwards
+```
+
+Store that value in Jenkins as a *Secret text* credential (e.g. `atlasos-hook`),
+then add this to the pipeline's `post` block:
+
+```groovy
+post {
+  failure {
+    withCredentials([string(credentialsId: 'atlasos-hook', variable: 'ATLASOS_TOKEN')]) {
+      sh '''curl -s -X POST https://<your-ngrok-host>/webhook/jenkins \
+        -H "Content-Type: application/json" -H "X-AtlasOS-Token: $ATLASOS_TOKEN" \
+        -d "{\\"job\\": \\"$JOB_NAME\\", \\"build\\": $BUILD_NUMBER, \\"status\\": \\"FAILURE\\"}"'''
+    }
+  }
+}
+```
+
+The Jenkins Notification plugin's JSON format is accepted too (token as
+`?token=` in its URL). Requests without the right token get 401, and with no
+secret configured every request is rejected. To test the whole path without
+breaking a build: `agent jenkins webhook-test <job> --build <failed build>`.
+
 ## AWS Spend Alerts
 
 Once a day (at the first check at or after 1 AM, or when the laptop wakes if

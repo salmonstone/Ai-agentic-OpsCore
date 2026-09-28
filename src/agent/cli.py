@@ -5641,6 +5641,46 @@ def jenkins_trigger(
 # Command: agent jenkins log JOB_NAME
 # ---------------------------------------------------------------------------
 
+@jenkins_app.command("webhook-test")
+def jenkins_webhook_test(
+    job_name: str = typer.Argument(..., help="A real Jenkins job whose failed build to report."),
+    build: int = typer.Option(0, "--build", "-b", help="Build number (0 = the job's latest)."),
+    url: str = typer.Option("http://127.0.0.1:8000/webhook/jenkins", "--url",
+                            help="Where to send it. Use your ngrok URL + /webhook/jenkins to test the public path."),
+) -> None:
+    """Send a signed 'build failed' event to the Jenkins failure hook, exactly
+    as Jenkins would — to prove the whole path (auth, diagnosis, Slack) works."""
+    import os
+
+    import httpx
+
+    token = os.environ.get("JENKINS_WEBHOOK_SECRET", "").strip()
+    if not token:
+        _print_error("JENKINS_WEBHOOK_SECRET isn't set. Create it: "
+                     "agent secrets set JENKINS_WEBHOOK_SECRET --generate")
+        raise typer.Exit(1)
+    number = build
+    if not number:
+        from agent.integrations import jenkins as jk
+        jobs = {j.name: j for j in jk.get_all_jobs()}
+        if job_name not in jobs or not jobs[job_name].last_build_number:
+            _print_error(f"No build history for '{job_name}'.")
+            raise typer.Exit(1)
+        number = jobs[job_name].last_build_number
+    try:
+        r = httpx.post(url, json={"job": job_name, "build": number, "status": "FAILURE"},
+                       headers={"X-AtlasOS-Token": token}, timeout=15)
+    except httpx.HTTPError as e:
+        _print_error(f"Couldn't reach {url}: {e}")
+        raise typer.Exit(1)
+    console.print(f"[bold]{r.status_code}[/bold] {_escape(r.text)}")
+    if r.status_code == 202:
+        console.print(f"[green]✓ Accepted.[/green] Diagnosing {_escape(job_name)} #{number} — "
+                      "the result lands in Slack in ~30–60s.")
+    elif r.status_code == 200 and "duplicate" in r.text:
+        console.print("[yellow]This build was already reported — each build is handled once.[/yellow]")
+
+
 @jenkins_app.command("log")
 def jenkins_log(
     job_name: str = typer.Argument(..., help="Exact Jenkins job name."),
@@ -14290,6 +14330,9 @@ def secrets_set(
     name: str = typer.Argument(..., help="Variable name, e.g. JENKINS_API_TOKEN."),
     generate: bool = typer.Option(False, "--generate",
                                   help="Generate a random token (e.g. to rotate MCP_AUTH_TOKEN)."),
+    no_show: bool = typer.Option(False, "--no-show",
+                                 help="With --generate: don't print the value (read it later from "
+                                      "Windows Credential Manager, entry atlasos:<NAME>)."),
 ) -> None:
     """Store or replace one secret (typed hidden, or generated)."""
     sec = _secrets_backend_or_exit()
@@ -14303,7 +14346,10 @@ def secrets_set(
         _print_error(str(e))
         raise typer.Exit(1)
     console.print(f"[green]✓ {name} stored in {sec.backend_name()}.[/green]")
-    if generate:
+    if generate and no_show:
+        console.print(f"  Value not shown. To read it: Credential Manager → Windows Credentials → "
+                      f"atlasos:{name} → Show.")
+    elif generate:
         # Shown exactly once so it can be pasted into the client (e.g. the
         # ChatGPT connector URL). It is not written anywhere in plaintext.
         console.print(f"  New value (shown once): [bold]{value}[/bold]")
