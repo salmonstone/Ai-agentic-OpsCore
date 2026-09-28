@@ -228,6 +228,7 @@ class HealingDaemon:
                 if now.hour == 1 and now.minute == 3 and self._cost_done_date != today:
                     self._run_cost_fixes()
                     self._check_spend_anomalies()
+                    self._check_rds_capacity()
                     self._cost_done_date = today
             except Exception as exc:
                 self.log.error("daemon.cost_watcher.error", error=str(exc))
@@ -343,6 +344,54 @@ class HealingDaemon:
                          date=anomaly["date"], amount=anomaly["amount"])
         except Exception as exc:
             self.log.warning("daemon.cost_anomaly.slack_failed", error=str(exc))
+
+    def _check_rds_capacity(self, force: bool = False) -> None:
+        """Alert if any RDS instance's free storage is on a trend to hit
+        zero within 14 days.
+
+        A storage trend moves slowly compared to daily spend, so this uses
+        a 7-day cooldown per instance instead of the cost check's 1-day one:
+        a nightly re-alert about the same slow leak would just be noise, but
+        if it's still critical a week later that's worth saying again.
+        """
+        from agent.integrations import daemon_db
+        from agent.integrations.rds import forecast_storage_capacity
+        from agent.integrations.slack import send_alert_generic
+
+        try:
+            rows = forecast_storage_capacity(days=14)
+        except Exception as exc:
+            self.log.warning("daemon.rds_capacity.check_failed", error=str(exc))
+            return
+
+        for row in rows:
+            if row["status"] != "critical":
+                continue
+
+            key = f"capacity_rds/{row['id']}"
+            if not force and daemon_db.check_cooldown(key, cooldown_minutes=7 * 1440):
+                continue
+
+            try:
+                send_alert_generic(
+                    title="RDS storage running out",
+                    message=(
+                        f"💽 `{row['id']}` has {row['free_gb_now']:.1f} GB free "
+                        f"(of {row['allocated_storage_gb']} GB allocated) and is shrinking by "
+                        f"{abs(row['trend_gb_per_day']):.2f} GB/day — "
+                        f"about {row['days_until_full']:.0f} days until it's full.\n\n"
+                        f"Options: increase allocated storage, enable storage autoscaling, "
+                        f"or find what's growing (old logs, unbounded tables, etc.)."
+                    ),
+                    severity="critical",
+                    fields={"Instance": row["id"], "Free now": f"{row['free_gb_now']:.1f} GB",
+                            "Days left": f"{row['days_until_full']:.0f}"},
+                )
+                daemon_db.set_cooldown(key)
+                self.log.info("daemon.rds_capacity.alerted",
+                             instance=row["id"], days_left=row["days_until_full"])
+            except Exception as exc:
+                self.log.warning("daemon.rds_capacity.slack_failed", error=str(exc))
 
     # ------------------------------------------------------------------
     # Event watcher

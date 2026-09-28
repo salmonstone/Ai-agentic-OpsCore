@@ -191,6 +191,113 @@ def get_rds_metrics(instance_id: str, region: str = _DEFAULT_REGION) -> dict:
 
 
 # ===========================================================================
+# Storage capacity forecast
+# IAM: cloudwatch:GetMetricStatistics (same permission as get_rds_metrics)
+# ===========================================================================
+
+_MIN_POINTS_FOR_TREND = 4          # fewer days of data than this and we don't guess
+_STABLE_SLOPE_GB_PER_DAY = 0.01    # smaller than this and it's noise, not a real trend
+
+
+def _linear_trend(points: list[tuple[float, float]]) -> tuple[float, float]:
+    """Least-squares slope and intercept for (x, y) points — x is a day
+    index, y is free storage in GB. No numpy dependency for one line of math."""
+    n = len(points)
+    sum_x = sum(x for x, _ in points)
+    sum_y = sum(y for _, y in points)
+    sum_xx = sum(x * x for x, _ in points)
+    sum_xy = sum(x * y for x, y in points)
+    denom = n * sum_xx - sum_x * sum_x
+    if denom == 0:
+        return 0.0, (sum_y / n if n else 0.0)
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+    intercept = (sum_y - slope * sum_x) / n
+    return slope, intercept
+
+
+def forecast_storage_capacity(region: str = "", days: int = 14) -> list[dict]:
+    """Project when each RDS instance's free storage hits zero, from a plain
+    linear trend over the last `days` days of CloudWatch FreeStorageSpace.
+
+    Only ever extrapolates a SHRINKING trend: flat or growing free space
+    gets days_until_full=None rather than a nonsensical forecast in the
+    wrong direction. Needs at least _MIN_POINTS_FOR_TREND days of data, or
+    it says so instead of guessing from too few points.
+    """
+    region = _region(region)
+    instances = get_rds_instances(region)
+    if not instances:
+        return []
+
+    boto3, ClientError = _import_boto3()
+    if boto3 is None:
+        return []
+    try:
+        cw = get_aws_client("cloudwatch", region_name=region)
+    except Exception as e:
+        log.warning("rds.failed", check="cloudwatch_client", error=str(e))
+        return []
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    out: list[dict] = []
+
+    for inst in instances:
+        row = {
+            "id": inst["id"], "region": region, "allocated_storage_gb": inst["storage_gb"],
+            "free_gb_now": 0.0, "trend_gb_per_day": 0.0,
+            "days_until_full": None, "status": "unknown", "note": "",
+        }
+        try:
+            resp = cw.get_metric_statistics(
+                Namespace="AWS/RDS", MetricName="FreeStorageSpace",
+                Dimensions=[{"Name": "DBInstanceIdentifier", "Value": inst["id"]}],
+                StartTime=start, EndTime=end, Period=86400, Statistics=["Average"],
+            )
+        except ClientError as e:
+            row["status"] = "no_data"
+            row["note"] = "access denied" if _is_access_denied(e) else "CloudWatch query failed"
+            out.append(row)
+            continue
+        except Exception as e:
+            row["status"] = "no_data"
+            row["note"] = str(e)[:120]
+            out.append(row)
+            continue
+
+        points = sorted(resp.get("Datapoints", []), key=lambda p: p["Timestamp"])
+        series = [(i, p["Average"] / _GB) for i, p in enumerate(points)]
+        if not series:
+            row["status"] = "no_data"
+            row["note"] = "no CloudWatch data points in this window"
+            out.append(row)
+            continue
+
+        row["free_gb_now"] = round(series[-1][1], 2)
+
+        if len(series) < _MIN_POINTS_FOR_TREND:
+            row["status"] = "not_enough_data"
+            row["note"] = f"only {len(series)} day(s) of data — need {_MIN_POINTS_FOR_TREND}+"
+            out.append(row)
+            continue
+
+        slope, _intercept = _linear_trend(series)
+        row["trend_gb_per_day"] = round(slope, 3)
+
+        if slope >= -_STABLE_SLOPE_GB_PER_DAY:
+            row["status"] = "stable"
+            out.append(row)
+            continue
+
+        days_left = row["free_gb_now"] / abs(slope)
+        row["days_until_full"] = round(days_left, 1)
+        row["status"] = "critical" if days_left < 14 else ("watch" if days_left < 60 else "stable")
+        out.append(row)
+
+    return out
+
+
+# ===========================================================================
 # RDS events
 # IAM: rds:DescribeEvents
 # ===========================================================================
