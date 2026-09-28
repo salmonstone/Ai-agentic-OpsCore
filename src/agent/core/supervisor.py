@@ -53,6 +53,32 @@ def _now() -> float:
     return time.monotonic()
 
 
+def _replace_atomic(tmp: Path, path: Path, attempts: int = 6) -> bool:
+    """os.replace with retries.
+
+    Observed live: Windows Defender or the search indexer can hold a
+    just-written file open for scanning for a moment, and os.replace() onto
+    it then raises PermissionError (WinError 5) even though nothing in this
+    process has it open. That is transient — retrying briefly clears it.
+    On persistent failure this drops the write rather than raise: the state
+    file is informational (`agent supervise status`), and losing one write is
+    far cheaper than the alternative of crashing the loop that is supervising
+    real services over it.
+    """
+    delay = 0.05
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return True
+        except OSError:
+            if attempt == attempts - 1:
+                tmp.unlink(missing_ok=True)
+                return False
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+    return False
+
+
 def _iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
 
@@ -348,7 +374,7 @@ class Supervisor:
         path = self._p(STATE_FILE)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        _replace_atomic(tmp, path)
 
     def stop_requested(self) -> bool:
         return self._p(STOP_FILE).exists()
@@ -358,7 +384,10 @@ class Supervisor:
         for rt in reversed(self.services):
             self._terminate(rt)
             rt.state, rt.reason = "stopped", ""
-        self.write_state()
+        try:
+            self.write_state()
+        except Exception as exc:
+            print(f"supervisor: final state write failed: {exc!r}")
 
     def run(self, max_seconds: float | None = None) -> None:
         self._p(STOP_FILE).unlink(missing_ok=True)
@@ -367,8 +396,15 @@ class Supervisor:
             while not self.stop_requested():
                 if deadline and _now() >= deadline:
                     break
-                self.step()
-                self.write_state()
+                try:
+                    self.step()
+                    self.write_state()
+                except Exception as exc:
+                    # The one job of this loop is keeping ngrok/mcp/daemon up.
+                    # A glitch in bookkeeping (or anything else unforeseen)
+                    # must not take every supervised service down with it —
+                    # log it and keep supervising.
+                    print(f"supervisor: tick failed, continuing: {exc!r}")
                 time.sleep(self.tick)
         finally:
             self.shutdown()
