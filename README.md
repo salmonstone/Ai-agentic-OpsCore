@@ -103,6 +103,19 @@ with `confirm=True` — nothing is cached from when it was proposed, so it
 always acts on the current state, not a stale diagnosis. A proposal expires
 (45 min by default) rather than staying clickable indefinitely.
 
+**ChatGPT (or any MCP client) can propose too.** The fix tools themselves are
+never exposed over HTTP, but `propose_fix` is: after diagnosing something,
+ChatGPT can put a fix in front of you as the same Slack Approve/Reject
+message, and `approval_status` tells it what you decided. Proposing changes
+nothing on its own. The limits are:
+- only the six `*_apply_fix` kinds and `test` (see `list_proposable_fixes`);
+  the daemon's crashloop fix is excluded because it carries a free-form
+  kubectl command
+- unknown or missing params are rejected, `confirm` can never be proposed,
+  and values are converted to the fix's declared types
+- an identical pending proposal is returned rather than sent again
+- at most 5 remote proposals can be waiting at once
+
 The autonomous daemon uses this too, but only for its riskiest step: a
 crash-looping pod always gets an immediate, automatic rolling restart (that
 part never waits — it's bounded and reversible), but if the restart alone

@@ -622,6 +622,70 @@ async def aws_capacity_forecast(region: str = "", days: int = 14) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Propose-then-approve — available even in readonly mode. These never change
+# infrastructure: propose_fix records a pending proposal and sends a Slack
+# Approve/Reject message; only a human tapping Approve runs the fix, through
+# the same *_apply_fix function with confirm=True. Limits (allowed kinds,
+# param validation, dedupe, max pending) live in agent.core.fix_registry.
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def list_proposable_fixes() -> dict:
+    """Which fixes can be proposed with propose_fix, and the params each needs.
+    Read-only."""
+    def _run():
+        from agent.core import fix_registry
+        return {k: fix_registry.param_spec(k) for k in sorted(fix_registry.REMOTE_PROPOSABLE)}
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def propose_fix(kind: str, summary: str, params: dict | None = None) -> dict:
+    """Propose a fix for a HUMAN to approve in Slack. Changes nothing itself.
+
+    Use this after diagnosing a problem (k8s_diagnose, jenkins_diagnose,
+    aws_diagnose, cost_analyze, ...) when a fix would help. It sends the
+    operator a Slack message with Approve/Reject buttons; the fix only runs
+    if they tap Approve, and then re-diagnoses fresh before acting. Tell the
+    user it's waiting for their approval — never say it was applied.
+
+    kind: one of list_proposable_fixes(), e.g. "k8s_apply_fix".
+    summary: one plain sentence for the approver — what's wrong and what the
+        fix does, e.g. "Pod api-7d8 is CrashLoopBackOff; restart it".
+    params: that kind's arguments, e.g. {"pod_name": "api-7d8", "namespace": "prod"}.
+        Never include `confirm`.
+    """
+    def _run():
+        from agent.core import fix_registry
+        try:
+            r = fix_registry.propose(kind, params or {}, summary, source="MCP (ChatGPT)", remote=True)
+        except fix_registry.ProposalError as e:
+            return {"proposed": False, "error": str(e)}
+        msg = ("An identical proposal is already waiting for approval — not sent again."
+               if r["duplicate"] else
+               "Sent to Slack for human approval. Nothing has been changed yet.")
+        return {"proposed": True, "approval_id": r["id"], "status": r["status"],
+                "expires_at": r["expires_at"], "message": msg}
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def approval_status(approval_id: str) -> dict:
+    """Check whether a proposed fix was approved, rejected, applied, failed,
+    or expired — and its result. Read-only."""
+    def _run():
+        from agent.core import approvals
+        approvals.expire_stale()
+        a = approvals.get(approval_id)
+        if a is None:
+            return {"found": False, "error": f"No approval with id {approval_id!r}"}
+        return {"found": True, "id": a.id, "kind": a.kind, "status": a.status,
+                "summary": a.summary, "decided_by": a.decided_by, "result": a.result,
+                "expires_at": a.expires_at}
+    return await asyncio.to_thread(_run)
+
+
+# ---------------------------------------------------------------------------
 # Tier 2 — mutating tools. Every one requires confirm=True from the caller;
 # without it, they return the diagnosis/fix that WOULD run and do nothing.
 # ---------------------------------------------------------------------------

@@ -196,6 +196,13 @@ def test_stdio_mode_keeps_the_full_tool_set(tool_sets):
     assert WITHHELD <= tool_sets["stdio"]
 
 
+def test_remote_clients_get_propose_but_never_apply(tool_sets):
+    # ChatGPT can propose a fix (a human approves in Slack) but no *_apply_fix
+    # tool is reachable over HTTP.
+    assert {"propose_fix", "approval_status", "list_proposable_fixes"} <= tool_sets["http"]
+    assert not {t for t in tool_sets["http"] if t.endswith("_apply_fix")}
+
+
 def test_modes_differ_by_exactly_the_withheld_set(tool_sets):
     assert tool_sets["stdio"] - tool_sets["http"] == WITHHELD
     assert tool_sets["http"] <= tool_sets["stdio"]
