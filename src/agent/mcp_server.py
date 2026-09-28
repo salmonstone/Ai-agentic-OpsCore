@@ -605,6 +605,22 @@ async def aws_auth_status() -> dict:
     return await asyncio.to_thread(_run)
 
 
+@mcp.tool()
+async def aws_capacity_forecast(region: str = "", days: int = 14) -> dict:
+    """Project when each RDS instance's free storage runs out, from a plain
+    linear trend over recent CloudWatch history — not just current usage.
+    Read-only. Only ever extrapolates a SHRINKING trend; flat or growing
+    free space reports days_until_full=null, never a backwards forecast.
+
+    region: AWS region; defaults to your configured AWS_REGION.
+    days: how many days of CloudWatch history to fit the trend to.
+    """
+    def _run():
+        from agent.integrations.rds import forecast_storage_capacity
+        return {"forecasts": forecast_storage_capacity(region, days)}
+    return await asyncio.to_thread(_run)
+
+
 # ---------------------------------------------------------------------------
 # Tier 2 — mutating tools. Every one requires confirm=True from the caller;
 # without it, they return the diagnosis/fix that WOULD run and do nothing.

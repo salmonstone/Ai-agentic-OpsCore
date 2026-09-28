@@ -12236,6 +12236,25 @@ def daemon_check_cost_anomalies(
     console.print("[dim]For the full picture: agent cost analyze[/dim]")
 
 
+@daemon_app.command("check-rds-capacity")
+def daemon_check_rds_capacity(
+    force: bool = typer.Option(False, "--force",
+                               help="Ignore the 7-day per-instance cooldown and alert again if still critical."),
+) -> None:
+    """Run the nightly RDS storage-capacity check now instead of waiting for 1:03 AM.
+
+    Alerts only for an instance trending toward under 14 days of free
+    storage left. Safe to run any time — read-only against CloudWatch."""
+    from agent.core.daemon import HealingDaemon
+
+    console.print("[dim]Checking CloudWatch storage trends for every RDS instance…[/dim]")
+    HealingDaemon()._check_rds_capacity(force=force)
+    console.print("[green]✓ Checked.[/green] A Slack alert was sent only for an instance "
+                  "trending toward <14 days left [dim](and hadn't already alerted this week, "
+                  "unless --force).[/dim]")
+    console.print("[dim]For every instance's trend, not just critical ones: agent db capacity-forecast[/dim]")
+
+
 @daemon_app.command("status")
 def daemon_status() -> None:
     """Show daemon status and recent autonomous actions."""
@@ -12830,6 +12849,47 @@ def db_metrics(
         console.print(Panel(body, title="RDS Metrics (last 1h)", border_style="cyan"))
         console.print()
 
+    except typer.Exit:
+        raise
+    except Exception as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+
+
+@db_app.command("capacity-forecast")
+def db_capacity_forecast(
+    region: str = typer.Option("", "--region", "-r", help="Defaults to your configured AWS_REGION."),
+    days:   int  = typer.Option(14, "--days", help="How many days of CloudWatch history to fit the trend to."),
+) -> None:
+    """Project when each RDS instance's free storage runs out, from a plain
+    trend line over recent CloudWatch data — not just current usage."""
+    try:
+        from agent.integrations.rds import forecast_storage_capacity
+
+        with console.status("[bold green]Fetching CloudWatch storage history...", spinner="dots"):
+            rows = forecast_storage_capacity(region, days)
+
+        if not rows:
+            console.print("[yellow]No RDS instances found (or no permission to read them).[/yellow]")
+            return
+
+        t = Table(box=None, padding=(0, 2))
+        for col in ("Instance", "Allocated", "Free now", "Trend", "Days left", ""):
+            t.add_column(col)
+        colors = {"critical": "red", "watch": "yellow", "stable": "green",
+                  "not_enough_data": "dim", "no_data": "dim", "unknown": "dim"}
+        icons = {"critical": "🔴", "watch": "🟡", "stable": "🟢"}
+        for r in rows:
+            trend = f"{r['trend_gb_per_day']:+.2f} GB/day" if r["status"] not in ("no_data", "not_enough_data") else "—"
+            left = f"{r['days_until_full']:.0f} days" if r["days_until_full"] is not None else "—"
+            note = r["note"] or icons.get(r["status"], "")
+            t.add_row(r["id"], f"{r['allocated_storage_gb']} GB", f"{r['free_gb_now']:.1f} GB",
+                      trend, left, f"[{colors.get(r['status'], 'white')}]{note}[/]")
+        console.print()
+        console.print(t)
+        console.print(f"[dim]Trend fit over the last {days} days. "
+                      f"🔴 <14 days left · 🟡 <60 days · 🟢 stable or growing.[/dim]")
+        console.print()
     except typer.Exit:
         raise
     except Exception as e:

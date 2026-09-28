@@ -135,6 +135,26 @@ agent daemon check-cost-anomalies --force  # ...and alert again even if today al
 Read-only against Cost Explorer — safe to run any time, and a no-op if
 nothing looks unusual.
 
+## RDS Capacity Forecast
+
+Everything else answers "is this healthy right now" — this answers "at this
+rate, when does it run out." Each night, alongside the cost checks, the
+daemon fits a plain trend line to every RDS instance's free storage over the
+last 14 days of CloudWatch data and, if it's shrinking fast enough to hit
+zero within 14 days, Slacks you the instance, the trend, and days left. It
+only ever extrapolates a *shrinking* trend — flat or growing free space is
+never reported as a countdown — and needs a handful of days of history
+before it will guess at all.
+
+```bash
+agent db capacity-forecast              # every RDS instance's trend, not just critical ones
+agent daemon check-rds-capacity         # run the nightly Slack check right now
+agent daemon check-rds-capacity --force # ...and alert again even if this week already did
+```
+
+A critical instance alerts at most once a week, not every night, since a
+storage trend moves slowly and a nightly repeat would just be noise.
+
 ## What You Can Configure
 
 The `agent setup` wizard walks you through each integration:
