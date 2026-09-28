@@ -227,6 +227,7 @@ class HealingDaemon:
                 today = now.strftime("%Y-%m-%d")
                 if now.hour == 1 and now.minute == 3 and self._cost_done_date != today:
                     self._run_cost_fixes()
+                    self._check_spend_anomalies()
                     self._cost_done_date = today
             except Exception as exc:
                 self.log.error("daemon.cost_watcher.error", error=str(exc))
@@ -284,6 +285,64 @@ class HealingDaemon:
                 self.log.warning("daemon.cost_fixes.slack_failed", error=str(exc))
         self.log.info("daemon.cost_fixes.done", fixes=fixes, saved=saved)
         return fixes
+
+    def _check_spend_anomalies(self, force: bool = False) -> None:
+        """Alert if AWS spend on the most recent billed day is a statistical
+        outlier (> mean + 1.5 stddev over the last 30 days).
+
+        get_spend_anomalies() always looks back over a rolling 30-day
+        window, so the same spike would reappear in its output every night
+        for weeks — this only ever acts on the single most recent day AWS
+        has data for, and a per-date cooldown key means that day can alert
+        at most once even if the daemon restarts partway through.
+        """
+        from agent.integrations import daemon_db
+        from agent.integrations.aws_cost import get_spend_anomalies
+        from agent.integrations.slack import send_alert_generic
+
+        try:
+            data = get_spend_anomalies(days=30)
+        except Exception as exc:
+            self.log.warning("daemon.cost_anomaly.check_failed", error=str(exc))
+            return
+
+        totals = data.get("daily_totals", [])
+        if not totals:
+            return
+        latest = totals[-1]
+        anomaly = next((a for a in data.get("anomaly_days", []) if a["date"] == latest["date"]), None)
+        if anomaly is None:
+            return
+
+        key = f"cost_anomaly/{anomaly['date']}"
+        if not force and daemon_db.check_cooldown(key, cooldown_minutes=1440):
+            return
+
+        culprits = anomaly.get("culprit_services", [])
+        culprit_lines = "\n".join(
+            f"  • {c['service']}: ${c['amount']:.2f} (usually ${c['avg']:.2f}, +${c['delta']:.2f})"
+            for c in culprits[:3]
+        ) or "  (no single service stands out — spread across many)"
+
+        try:
+            send_alert_generic(
+                title="AWS spend spike",
+                message=(
+                    f"💰 AWS spend on {anomaly['date']} was ${anomaly['amount']:.2f} — "
+                    f"{anomaly['pct_above_mean']:.0f}% above your 30-day average "
+                    f"(${data.get('mean_daily', 0):.2f}/day).\n\n"
+                    f"Top contributors:\n{culprit_lines}\n\n"
+                    f"Run `agent cost analyze` for the full breakdown."
+                ),
+                severity="warning",
+                fields={"Day": anomaly["date"], "Amount": f"${anomaly['amount']:.2f}",
+                        "vs 30d avg": f"+{anomaly['pct_above_mean']:.0f}%"},
+            )
+            daemon_db.set_cooldown(key)
+            self.log.info("daemon.cost_anomaly.alerted",
+                         date=anomaly["date"], amount=anomaly["amount"])
+        except Exception as exc:
+            self.log.warning("daemon.cost_anomaly.slack_failed", error=str(exc))
 
     # ------------------------------------------------------------------
     # Event watcher

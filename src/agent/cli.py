@@ -12215,6 +12215,27 @@ def daemon_stop() -> None:
         pid_file.unlink(missing_ok=True)
 
 
+@daemon_app.command("check-cost-anomalies")
+def daemon_check_cost_anomalies(
+    force: bool = typer.Option(False, "--force",
+                               help="Ignore the per-day cooldown and alert again even if today "
+                                    "already triggered one."),
+) -> None:
+    """Run the nightly AWS spend-anomaly check now instead of waiting for 1:03 AM.
+
+    Looks at the most recent day AWS has billing data for; if it's a
+    statistical outlier vs. the last 30 days, sends the same Slack alert the
+    daemon would send overnight. Safe to run any time — read-only against
+    Cost Explorer, and normally a no-op if nothing looks unusual."""
+    from agent.core.daemon import HealingDaemon
+
+    console.print("[dim]Checking AWS Cost Explorer for a spend anomaly on the most recent billed day…[/dim]")
+    HealingDaemon()._check_spend_anomalies(force=force)
+    console.print("[green]✓ Checked.[/green] A Slack alert was sent only if that day was anomalous "
+                  "[dim](and hadn't already alerted, unless --force).[/dim]")
+    console.print("[dim]For the full picture: agent cost analyze[/dim]")
+
+
 @daemon_app.command("status")
 def daemon_status() -> None:
     """Show daemon status and recent autonomous actions."""
