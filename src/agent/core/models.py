@@ -1194,6 +1194,25 @@ class JenkinsDiagnosis(BaseModel):
     risk_level:    str = "medium"  # low/medium/high
 
 
+class GitHubActionsDiagnosis(BaseModel):
+    repo:               str = ""
+    run_id:             int = 0
+    run_number:         int = 0
+    workflow:           str = ""
+    branch:             str = ""
+    sha:                str = ""
+    url:                str = ""
+    conclusion:         str | None = None
+    failed_jobs:        list[str] = Field(default_factory=list)
+    failed_steps:       list[str] = Field(default_factory=list)
+    category:           str = "unknown"   # test_failure/build_error/dependency/lint/config/infra_flaky/timeout/unknown
+    root_cause:         str = ""
+    confidence:         str = "low"       # high/medium/low
+    suggested_fix:      str = ""
+    explanation:        str = ""
+    rerun_likely_helps: bool = False
+
+
 class JenkinsScanReport(BaseModel):
     total_jobs:          int = 0
     failing_jobs:        int = 0

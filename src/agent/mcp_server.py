@@ -251,6 +251,43 @@ async def jenkins_diagnose(job_name: str, build_number: int | None = None) -> di
 
 
 @mcp.tool()
+async def github_actions_runs(repo: str = "", limit: int = 10, failed_only: bool = False) -> dict:
+    """List recent GitHub Actions workflow runs for a repo. Read-only.
+
+    repo: "owner/name"; defaults to GITHUB_REPO, then the server checkout's origin.
+    limit: how many runs (max 100).
+    failed_only: only runs that failed.
+    """
+    def _run():
+        from agent.integrations import github_actions as gha
+        try:
+            r = gha.resolve_repo(repo)
+            return {"repo": r, "runs": gha.list_runs(r, limit=limit, failed_only=failed_only)}
+        except gha.GitHubError as e:
+            return {"error": str(e)}
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def github_actions_diagnose(run_id: int = 0, repo: str = "") -> dict:
+    """AI root-cause diagnosis of a failed GitHub Actions run: which jobs and
+    steps failed, why, the concrete fix, and whether a re-run would help.
+    Read-only — never re-runs anything.
+
+    run_id: from github_actions_runs; 0 = the repo's latest failed run.
+    repo: "owner/name"; defaults to GITHUB_REPO, then the server checkout's origin.
+    """
+    def _run():
+        from agent.integrations import github_actions as gha
+        from agent.skills.github_actions import GitHubActionsSkill
+        try:
+            return GitHubActionsSkill().diagnose(repo, run_id).model_dump()
+        except gha.GitHubError as e:
+            return {"error": str(e)}
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def jenkins_auth_status() -> dict:
     """Verify the Jenkins connection and return version/executor/agent info."""
     def _run():

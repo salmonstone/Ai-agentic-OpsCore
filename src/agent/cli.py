@@ -328,6 +328,12 @@ approvals_app = typer.Typer(
 )
 app.add_typer(approvals_app, name="approvals")
 
+github_app = typer.Typer(
+    help="GitHub Actions — list workflow runs and diagnose failures. Read-only.",
+    no_args_is_help=True,
+)
+app.add_typer(github_app, name="github")
+
 console = Console()
 
 # ---------------------------------------------------------------------------
@@ -14511,6 +14517,80 @@ def approvals_kinds() -> None:
     from agent.core.fix_registry import kinds
     for k in kinds():
         console.print(f"  [cyan]{k}[/cyan]")
+
+
+# ---------------------------------------------------------------------------
+# Commands: agent github runs / diagnose
+# ---------------------------------------------------------------------------
+
+@github_app.command("runs")
+def github_runs(
+    repo:   str  = typer.Option("", "--repo", "-r", help="owner/name. Defaults to GITHUB_REPO, then this checkout's origin."),
+    limit:  int  = typer.Option(10, "--limit", "-n"),
+    failed: bool = typer.Option(False, "--failed", help="Only failed runs."),
+) -> None:
+    """List recent GitHub Actions workflow runs."""
+    from agent.integrations import github_actions as gha
+    try:
+        repo = gha.resolve_repo(repo)
+        runs = gha.list_runs(repo, limit=limit, failed_only=failed)
+    except gha.GitHubError as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+    if not runs:
+        console.print(f"[yellow]No {'failed ' if failed else ''}runs in {repo}.[/yellow]")
+        return
+    t = Table(box=None, padding=(0, 2))
+    # Run ID is what you copy into `diagnose` — it must never be truncated.
+    t.add_column("Run ID", no_wrap=True, min_width=11, style="cyan")
+    t.add_column("Workflow", no_wrap=True, overflow="ellipsis", max_width=16)
+    t.add_column("Branch", no_wrap=True, overflow="ellipsis", max_width=14)
+    t.add_column("Result", no_wrap=True, min_width=9)
+    t.add_column("Commit", no_wrap=True, min_width=7)
+    t.add_column("Started", no_wrap=True, min_width=11)
+    colors = {"success": "green", "failure": "red", "cancelled": "dim", "timed_out": "red"}
+    for r in runs:
+        result = r["conclusion"] or r["status"]
+        t.add_row(str(r["id"]), _escape(r["workflow"]), _escape(r["branch"]),
+                  f"[{colors.get(r['conclusion'] or '', 'yellow')}]{result}[/]", r["sha"],
+                  r["created_at"][5:16].replace("T", " "))
+    console.print(f"[bold]{_escape(repo)}[/bold]")
+    console.print(t)
+    console.print("[dim]Diagnose one: agent github diagnose <run-id>   (no id = latest failed)[/dim]")
+
+
+@github_app.command("diagnose")
+def github_diagnose(
+    run_id: int = typer.Argument(0, help="Run ID from `agent github runs`. 0 = the latest failed run."),
+    repo:   str = typer.Option("", "--repo", "-r", help="owner/name. Defaults to GITHUB_REPO, then this checkout's origin."),
+) -> None:
+    """AI root-cause diagnosis of a failed GitHub Actions run. Read-only."""
+    from agent.integrations import github_actions as gha
+    from agent.skills.github_actions import GitHubActionsSkill
+    try:
+        with console.status("[bold green]Fetching failed jobs and logs, diagnosing...", spinner="dots"):
+            d = GitHubActionsSkill().diagnose(repo, run_id)
+    except gha.GitHubError as e:
+        _print_error(str(e))
+        raise typer.Exit(1)
+    head = f"[bold]{_escape(d.workflow or d.repo)}[/bold]"
+    if d.run_number:
+        head += f"  #{d.run_number}  [dim]{_escape(d.branch)} @ {d.sha}[/dim]"
+    lines = [head, ""]
+    if d.failed_steps:
+        lines.append("[bold]Failed:[/bold] " + _escape(", ".join(d.failed_steps)))
+    lines.append(f"[bold]Cause:[/bold] {_escape(d.root_cause)}")
+    if d.suggested_fix:
+        lines.append(f"[bold]Fix:[/bold] {_escape(d.suggested_fix)}")
+    if d.explanation:
+        lines.append(f"[dim]{_escape(d.explanation)}[/dim]")
+    lines.append(f"[dim]category={d.category}  confidence={d.confidence}  "
+                 f"rerun likely helps: {'yes' if d.rerun_likely_helps else 'no'}[/dim]")
+    if d.url:
+        lines.append(f"[dim]{d.url}[/dim]")
+    console.print()
+    console.print(Panel("\n".join(lines), title="GitHub Actions diagnosis", border_style="cyan"))
+    console.print()
 
 
 # ---------------------------------------------------------------------------
