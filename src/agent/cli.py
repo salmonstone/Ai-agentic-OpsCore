@@ -328,6 +328,12 @@ approvals_app = typer.Typer(
 )
 app.add_typer(approvals_app, name="approvals")
 
+summary_app = typer.Typer(
+    help="Daily summary: cluster, Jenkins, GitHub Actions, AWS spend, approvals, backups.",
+    no_args_is_help=True,
+)
+app.add_typer(summary_app, name="summary")
+
 github_app = typer.Typer(
     help="GitHub Actions — list workflow runs and diagnose failures. Read-only.",
     no_args_is_help=True,
@@ -14591,6 +14597,38 @@ def github_diagnose(
     console.print()
     console.print(Panel("\n".join(lines), title="GitHub Actions diagnosis", border_style="cyan"))
     console.print()
+
+
+# ---------------------------------------------------------------------------
+# Commands: agent summary show / send
+# ---------------------------------------------------------------------------
+
+@summary_app.command("show")
+def summary_show() -> None:
+    """Print today's summary in the terminal. Sends nothing."""
+    from agent.skills import daily_summary as ds
+    with console.status("[bold green]Checking cluster, Jenkins, GitHub, AWS, backups...", spinner="dots"):
+        sections = ds.build_summary()
+    console.print()
+    console.print(_escape(ds.render_text(sections)), highlight=False)
+    console.print()
+
+
+@summary_app.command("send")
+def summary_send(
+    force: bool = typer.Option(False, "--force", help="Send even if today's summary was already sent."),
+) -> None:
+    """Send today's summary to Slack (at most once a day unless --force)."""
+    from agent.skills import daily_summary as ds
+    with console.status("[bold green]Building today's summary...", spinner="dots"):
+        r = ds.send(force=force)
+    if r["sent"]:
+        console.print(f"[green]✓ Sent to Slack.[/green] {_escape(r['headline'])}")
+    elif r["reason"] == "already sent today":
+        console.print("[yellow]Already sent today.[/yellow] Use --force to send again.")
+    else:
+        _print_error(r["reason"])
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------

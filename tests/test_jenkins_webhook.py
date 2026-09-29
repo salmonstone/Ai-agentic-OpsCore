@@ -177,3 +177,16 @@ def test_diagnosis_failure_still_tells_slack(monkeypatch, slack):
     assert out == {"handled": True, "diagnosed": False}
     (alert,) = slack["alerts"]
     assert "couldn't diagnose" in alert["message"]
+
+
+def test_no_action_needed_is_a_plain_alert_not_a_proposal(monkeypatch, slack):
+    """Found live: a job built to fail on purpose (NO_ACTION_NEEDED) got a
+    pointless Approve button, because only MANUAL_ONLY was excluded."""
+    from agent.core.models import JenkinsFixAction
+    _fake_diagnosis(monkeypatch, fix_action=JenkinsFixAction.NO_ACTION_NEEDED)
+
+    out = asyncio.run(webhook._handle_jenkins_failure("atlas-os-hook-test", 1))
+
+    assert out["proposed"] is False and slack["approvals"] == []
+    (alert,) = slack["alerts"]
+    assert "No action needed" in alert["message"]
