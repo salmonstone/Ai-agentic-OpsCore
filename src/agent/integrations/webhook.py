@@ -292,6 +292,9 @@ def _claim_jenkins_build(job: str, number: int) -> bool:
     return True
 
 
+_NON_FIX_ACTIONS = frozenset({"MANUAL_ONLY", "NO_ACTION_NEEDED"})
+
+
 async def _handle_jenkins_failure(job: str, number: int) -> dict:
     """Diagnose one failed build and tell Slack. Never raises."""
     import asyncio
@@ -322,7 +325,10 @@ async def _handle_jenkins_failure(job: str, number: int) -> dict:
     except Exception:
         pass
 
-    if action != "MANUAL_ONLY":
+    # Only an action AtlasOS can actually perform gets an Approve button.
+    # MANUAL_ONLY needs a human; NO_ACTION_NEEDED (e.g. a build that was
+    # meant to fail) needs nothing — offering "Approve" for it is noise.
+    if action not in _NON_FIX_ACTIONS:
         from agent.core import fix_registry
         summary = f"Jenkins {job} #{number} failed: {root} — suggested fix: {action}"
         try:
@@ -340,7 +346,9 @@ async def _handle_jenkins_failure(job: str, number: int) -> dict:
         title="Jenkins build failed",
         message=(f"❌ `{job}` #{number} failed.\n*Cause:* {root}\n"
                  f"{diag.get('explanation', '')}\n"
-                 + ("*Needs a manual fix.*" if action == "MANUAL_ONLY" else f"*Suggested fix:* {action}")
+                 + {"MANUAL_ONLY": "*Needs a manual fix.*",
+                    "NO_ACTION_NEEDED": "*No action needed* — this failure is expected."}.get(
+                        action, f"*Suggested fix:* {action}")
                  + (f"\n*Prevention:* {diag['prevention']}" if diag.get("prevention") else "")),
         severity="warning",
         fields={"Job": job, "Build": str(number), "Confidence": str(diag.get("confidence", ""))},

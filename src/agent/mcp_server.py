@@ -288,6 +288,20 @@ async def github_actions_diagnose(run_id: int = 0, repo: str = "") -> dict:
 
 
 @mcp.tool()
+async def daily_summary() -> dict:
+    """Today's AtlasOS summary: cluster health, failed Jenkins builds and
+    GitHub Actions runs in the last 24h, AWS spend vs average, fixes waiting
+    for approval, backup age, and AtlasOS's own status. Read-only — builds
+    the same report the morning Slack message has, without sending it."""
+    def _run():
+        from agent.skills import daily_summary as ds
+        sections = ds.build_summary()
+        return {"headline": ds.headline(sections),
+                "sections": [{"title": s.title, "status": s.status, "lines": s.lines} for s in sections]}
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def jenkins_auth_status() -> dict:
     """Verify the Jenkins connection and return version/executor/agent info."""
     def _run():

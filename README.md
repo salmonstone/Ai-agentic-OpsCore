@@ -131,6 +131,30 @@ port and tunnel as the MCP server, authenticated by Slack's own request
 signature rather than the MCP token. `SLACK_WEBHOOK_URL` and
 `SLACK_SIGNING_SECRET` must be set (`agent secrets status` shows where).
 
+## Daily Summary
+
+Every morning at 9:00 (or when the laptop wakes, if it was asleep then)
+AtlasOS posts one Slack message covering:
+- cluster nodes and unhealthy pods
+- Jenkins builds and GitHub Actions runs that failed in the last 24h
+- yesterday's AWS spend against your 30-day average
+- fixes waiting for your approval
+- the age of the last backup
+- whether the MCP server and ngrok are up
+
+It's sent every day even when everything is fine, so a missing message means
+AtlasOS itself isn't running. At most one goes out per day. It makes no AI
+calls; the only cost is AWS Cost Explorer's $0.01 per request.
+
+```bash
+agent summary show          # preview in the terminal, sends nothing
+agent summary send          # send today's now (--force to resend)
+```
+
+It runs from the "AtlasOS Daily Summary" scheduled task (`summary.bat`), so
+the daemon doesn't need to be running. ChatGPT can pull the same report
+through the `daily_summary` MCP tool.
+
 ## GitHub Actions
 
 The same kind of diagnosis AtlasOS does for Jenkins, for GitHub Actions runs:
