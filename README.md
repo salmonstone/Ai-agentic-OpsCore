@@ -131,6 +131,24 @@ port and tunnel as the MCP server, authenticated by Slack's own request
 signature rather than the MCP token. `SLACK_WEBHOOK_URL` and
 `SLACK_SIGNING_SECRET` must be set (`agent secrets status` shows where).
 
+## GitHub Actions
+
+The same kind of diagnosis AtlasOS does for Jenkins, for GitHub Actions runs:
+which jobs and steps failed, the root cause from the logs, the concrete fix,
+and whether a re-run would help. Read-only; it never re-runs anything.
+
+```bash
+agent github runs                     # recent runs (--failed for failures only, --repo owner/name)
+agent github diagnose                 # the latest failed run
+agent github diagnose <run-id>        # a specific run
+```
+
+ChatGPT gets the same through the `github_actions_runs` and
+`github_actions_diagnose` MCP tools. The repo defaults to `GITHUB_REPO`, then
+this checkout's `origin`. For access it uses `GITHUB_TOKEN` if set
+(`agent secrets set GITHUB_TOKEN`), otherwise the GitHub CLI's login
+(`gh auth login`).
+
 ## Jenkins Failure Hook
 
 When a Jenkins build fails, Jenkins can tell AtlasOS directly. AtlasOS runs
