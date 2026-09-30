@@ -31,8 +31,11 @@ _TABLE = "memories"
 # ---------------------------------------------------------------------------
 
 def _db() -> sqlite_utils.Database:
+    from agent.integrations.sqlite_conn import apply_pragmas
+
     Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)
     db = sqlite_utils.Database(settings.db_path)
+    apply_pragmas(db.conn)
     _ensure_table(db)
     return db
 

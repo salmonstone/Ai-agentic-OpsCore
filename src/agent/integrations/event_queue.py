@@ -41,9 +41,12 @@ _STUCK_MINUTES = 5    # events in "processing" longer than this → reset to pen
 # ---------------------------------------------------------------------------
 
 def _db() -> sqlite_utils.Database:
+    from agent.integrations.sqlite_conn import apply_pragmas
+
     Path(_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     db = sqlite_utils.Database(_DB_PATH)
     db.conn.isolation_level = None   # autocommit — every execute() commits immediately
+    apply_pragmas(db.conn)
     _ensure_schema(db)
     return db
 

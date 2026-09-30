@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 import subprocess
 import sys
 import uuid
@@ -50,8 +49,8 @@ def _query(db_path: str, sql: str, params: tuple = ()) -> list[dict]:
     if not p.exists():
         return []
     try:
-        con = sqlite3.connect(str(p), check_same_thread=False)
-        con.row_factory = sqlite3.Row
+        from agent.integrations.sqlite_conn import connect
+        con = connect(p)
         rows = con.execute(sql, params).fetchall()
         con.close()
         return [dict(r) for r in rows]
