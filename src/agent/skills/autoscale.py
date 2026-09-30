@@ -19,6 +19,26 @@ DEFAULT_UP_UTC = "03:30"
 DEFAULT_MAX_REPLICAS = 10
 
 
+def schedule_due(now: datetime, target_utc: str | None) -> bool:
+    """True once `now` (UTC) has reached target_utc's "HH:MM" for today.
+
+    Reaching the target, not matching it exactly: the old check was
+    `now_hhmm == target_utc`, tested by the schedule watcher every 60s. Any
+    poll that landed even a few seconds late — a slow prior iteration, a
+    laptop that was asleep — skipped that minute and the scale-down (or
+    scale-up) simply didn't happen for the whole day. Same class of bug as
+    the old nightly-check trigger (`core.daemon.nightly_due`), fixed the
+    same way: a "due" window instead of one exact tick.
+    """
+    if not target_utc:
+        return False
+    try:
+        target_h, target_m = (int(x) for x in target_utc.split(":", 1))
+    except (ValueError, AttributeError):
+        return False
+    return (now.hour, now.minute) >= (target_h, target_m)
+
+
 def _get_current_replicas(deployment: str, namespace: str) -> int:
     from agent.integrations.kubectl import run_kubectl
     res = run_kubectl(["get", "deployment", deployment, "-n", namespace, "-o",
@@ -57,29 +77,45 @@ def _notify(deployment: str, namespace: str, action: str,
         log.warning("autoscale.slack_failed", error=str(exc))
 
 
-def apply_schedule(policy: dict) -> dict:
-    """Check a policy against the current UTC time and scale if it matches.
+def apply_schedule(policy: dict, now: datetime | None = None) -> dict:
+    """Check a policy against the current UTC time and scale if it's due.
 
-    Scales to down_replicas at schedule_down_utc, up_replicas at schedule_up_utc.
-    Skips (no_action) if not the scheduled minute or already at target.
+    Scales to down_replicas once schedule_down_utc has passed for the day,
+    up_replicas once schedule_up_utc has passed. Skips (no_action) before
+    either time, or once already handled today.
     """
+    from agent.integrations import daemon_db
+
     deployment = policy["deployment"]
     namespace = policy["namespace"]
-    now_hhmm = datetime.now(timezone.utc).strftime("%H:%M")
+    now = now or datetime.now(timezone.utc)
 
     down_utc = policy.get("schedule_down_utc")
     up_utc = policy.get("schedule_up_utc")
 
-    if down_utc and now_hhmm == down_utc:
+    if schedule_due(now, down_utc):
         action = "schedule_down"
         target = int(policy.get("down_replicas", 1))
-    elif up_utc and now_hhmm == up_utc:
+        target_utc = down_utc
+    elif schedule_due(now, up_utc):
         action = "schedule_up"
         target = int(policy.get("up_replicas", 3))
+        target_utc = up_utc
     else:
         return {"action": "no_action", "deployment": deployment,
                 "namespace": namespace, "old_replicas": 0,
                 "new_replicas": 0, "success": True}
+
+    # Reaching a target time stays true for the rest of the day, so without a
+    # once-per-day claim this would re-fire on every poll after it, not just
+    # once. Claimed before doing anything else — like the nightly checks — so
+    # a crash partway through doesn't retry on the next poll either.
+    claim_key = f"autoscale_schedule/{policy.get('id')}/{action}/{now:%Y-%m-%d}"
+    if not daemon_db.claim_once(claim_key, cooldown_minutes=24 * 60):
+        return {"action": "no_action", "deployment": deployment,
+                "namespace": namespace, "old_replicas": 0,
+                "new_replicas": 0, "success": True,
+                "reason": "already_ran_today"}
 
     current = _get_current_replicas(deployment, namespace)
     if current == target:
@@ -89,7 +125,7 @@ def apply_schedule(policy: dict) -> dict:
                 "reason": "already_at_target"}
 
     success = _set_replicas(deployment, namespace, target)
-    reason = f"scheduled {action} at {now_hhmm} UTC"
+    reason = f"scheduled {action} (due {target_utc} UTC, ran at {now:%H:%M})"
     autoscale_db.log_event(
         policy.get("id"), deployment, namespace, action,
         current, target, reason, status="done" if success else "failed",
@@ -102,12 +138,13 @@ def apply_schedule(policy: dict) -> dict:
             "new_replicas": target, "success": success}
 
 
-def run_scheduled_scaling() -> list[dict]:
+def run_scheduled_scaling(now: datetime | None = None) -> list[dict]:
     """Apply every enabled policy against the current time. Returns results."""
+    now = now or datetime.now(timezone.utc)
     results: list[dict] = []
     for policy in autoscale_db.list_policies(enabled_only=True):
         try:
-            results.append(apply_schedule(policy))
+            results.append(apply_schedule(policy, now))
         except Exception as exc:
             log.error("autoscale.apply_schedule.error",
                       deployment=policy.get("deployment"), error=str(exc))
