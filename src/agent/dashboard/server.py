@@ -6,6 +6,16 @@ functions in src/agent/skills/ and src/agent/integrations/.
 """
 from __future__ import annotations
 
+import os
+
+# The dashboard assistant (dashboard/chat.py) runs tools from the MCP registry
+# in-process. Mutating tools are only registered when MCP_READONLY is off, and
+# the decision is made once, when agent.mcp_server is first imported — so it
+# has to be set before anything imports it. This affects only this local
+# process; the public MCP server (ngrok, ChatGPT) is a separate process with
+# its own setting. An explicit MCP_READONLY=1 in the environment still wins.
+os.environ.setdefault("MCP_READONLY", "0")
+
 import asyncio
 import json
 import sqlite3
@@ -18,7 +28,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -418,26 +428,18 @@ def _execute_skill(full_command: str, params: dict) -> Any:
             }
 
     # ── k8s ──────────────────────────────────────────────────────────────────
+    # (resources scan / cost scan used to be dispatched here to functions that
+    # don't exist — scan_resources / full_aws_analysis — so those buttons
+    # always errored. They now fall through to the real CLI command below.)
     if group == "k8s":
         if name == "scan":
-            from agent.skills.k8s import full_scan
-            return full_scan(namespace=params.get("namespace", "all"))
+            from agent.skills.k8s import K8sSkill
+            issues = K8sSkill().full_cluster_scan(params.get("namespace", "all"))
+            return {"issues": issues} if issues else {"output": "✓ scan complete · no problems found"}
         if name == "pods":
             from agent.integrations.kubectl import run_kubectl
             r = run_kubectl(["get", "pods", "-A"])
             return {"output": r.output or r.error or ""}
-
-    # ── resources ─────────────────────────────────────────────────────────────
-    if group == "resources":
-        if name == "scan":
-            from agent.skills.resource_monitor import scan_resources
-            return scan_resources()
-
-    # ── cost ─────────────────────────────────────────────────────────────────
-    if group == "cost":
-        if name == "scan":
-            from agent.skills.cost import full_aws_analysis
-            return full_aws_analysis()
 
     # ── db ────────────────────────────────────────────────────────────────────
     if group == "db":
@@ -829,6 +831,196 @@ async def api_cluster_add_eks(req: AddEKSRequest) -> JSONResponse:
         return JSONResponse(result, status_code=200 if result.get("success") else 400)
     except Exception as exc:
         raise HTTPException(500, str(exc))
+
+
+# ── status summary (Overview tiles) ───────────────────────────────────────────
+# The same seven sections as the daily Slack summary (skills/daily_summary.py),
+# each ok / warn / error — where error means "couldn't check", never healthy.
+# Cached: the AWS section is a Cost Explorer call ($0.01) and the Jenkins and
+# GitHub sections are several API calls, so polling must not rebuild it.
+_SUMMARY_TTL_S = 300
+_summary_cache: dict = {"at": 0.0, "data": None}
+
+@app.get("/api/summary")
+async def api_summary(force: bool = False) -> JSONResponse:
+    import time as _time
+    if force or _summary_cache["data"] is None or _time.time() - _summary_cache["at"] > _SUMMARY_TTL_S:
+        def _build():
+            from agent.skills import daily_summary as ds
+            sections = ds.build_summary()
+            return {
+                "headline": ds.headline(sections),
+                "sections": [{"title": s.title, "status": s.status, "lines": s.lines} for s in sections],
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        _summary_cache["data"] = await asyncio.get_event_loop().run_in_executor(None, _build)
+        _summary_cache["at"] = _time.time()
+    return JSONResponse(_summary_cache["data"])
+
+
+# ── cluster panel ─────────────────────────────────────────────────────────────
+@app.get("/api/cluster")
+def api_cluster() -> JSONResponse:
+    """Nodes (with CPU/memory from metrics-server when installed), problem pods,
+    and pods the daemon healed in the last 24h. Unreachable is reported as
+    unreachable — empty lists here never stand in for "no problems"."""
+    from agent.integrations.kubectl import (
+        check_cluster_auth, get_current_context, get_node_metrics_top,
+        get_nodes_detail, get_problematic_pods, is_cluster_available,
+    )
+    ctx = get_current_context()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    healed = _query("data/daemon.db",
+        "SELECT timestamp, category, action, resource, namespace, note FROM daemon_actions "
+        "WHERE timestamp >= ? AND success = 1 ORDER BY timestamp DESC LIMIT 20", (cutoff,))
+    base = {"context": ctx, "healed": healed, "checked_at": datetime.now(timezone.utc).isoformat()}
+
+    if not is_cluster_available():
+        return JSONResponse(base | {"reachable": False, "nodes": [], "problem_pods": [],
+                                    "error": "Kubernetes API server not reachable from this machine."})
+    nodes = get_nodes_detail()
+    if not nodes:
+        ok, msg = check_cluster_auth()
+        return JSONResponse(base | {"reachable": False, "nodes": [], "problem_pods": [],
+                                    "error": msg if not ok else "kubectl returned no nodes."})
+    metrics = {m.name: m for m in get_node_metrics_top()}
+    node_rows = []
+    for n in nodes:
+        m = metrics.get(n.name)
+        node_rows.append({
+            "name": n.name, "status": n.status, "instance_type": n.instance_type, "age": n.age,
+            "cpu_percent": m.cpu_percent if m else None,
+            "memory_percent": m.memory_percent if m else None,
+        })
+    pods = [p.model_dump() for p in get_problematic_pods()]
+    return JSONResponse(base | {"reachable": True, "nodes": node_rows, "problem_pods": pods,
+                                "metrics_available": bool(metrics), "error": None})
+
+
+# ── Jenkins panel: builds ─────────────────────────────────────────────────────
+@app.get("/api/jenkins/builds")
+def api_jenkins_builds() -> JSONResponse:
+    """Every job's last build + last 10 results, and failed builds from the last
+    7 days. Plain Jenkins API calls — no AI. Root causes come from the
+    assistant's jenkins_diagnose tool on demand, never guessed here."""
+    from agent.config import settings
+    if not settings.jenkins_url:
+        return JSONResponse({"configured": False, "connected": False, "jobs": [], "failures": []})
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from agent.integrations import jenkins as jk
+        info = jk.get_connection_info()
+        if not info.connected:
+            return JSONResponse({"configured": True, "connected": False, "error": info.error,
+                                 "jobs": [], "failures": []})
+        jobs = [j for j in jk.get_all_jobs() if not j.is_folder][:25]
+
+        def _hist(job):
+            try:
+                return job, jk.get_build_history(job.name, count=10)
+            except Exception:
+                return job, []
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            histories = list(pool.map(_hist, jobs))
+
+        week_ago_ms = (datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000
+        rows, failures = [], []
+        for job, builds in histories:
+            last = builds[0] if builds else None
+            rows.append({
+                "name": job.name,
+                "last_number": job.last_build_number,
+                "status": (last.status if last else job.last_build_status) or "NOT_BUILT",
+                "duration_ms": last.duration_ms if last else job.last_build_duration_ms,
+                "timestamp": last.timestamp if last else job.last_build_timestamp,
+                "trend": [b.status for b in reversed(builds)],
+            })
+            for b in builds:
+                if b.status == "FAILURE" and b.timestamp >= week_ago_ms:
+                    failures.append({"job": job.name, "number": b.number, "timestamp": b.timestamp,
+                                     "duration_ms": b.duration_ms, "node": b.node})
+        failures.sort(key=lambda f: f["timestamp"], reverse=True)
+        return JSONResponse({"configured": True, "connected": True, "url": settings.jenkins_url,
+                             "jobs": rows, "failures": failures})
+    except Exception as exc:
+        return JSONResponse({"configured": True, "connected": False, "error": str(exc),
+                             "jobs": [], "failures": []})
+
+
+# ── approvals (fix proposals from the daemon, Jenkins hook, chat, CLI) ───────
+@app.get("/api/approvals")
+def api_approvals() -> JSONResponse:
+    from agent.core import approvals
+    approvals.expire_stale()
+    def _row(a):
+        return {"id": a.id, "kind": a.kind, "summary": a.summary, "params": a.params,
+                "status": a.status, "created_at": a.created_at, "expires_at": a.expires_at,
+                "decided_at": a.decided_at, "decided_by": a.decided_by, "result": a.result}
+    items = approvals.list_actions(status=None, limit=50)
+    return JSONResponse({
+        "pending": [_row(a) for a in items if a.status == "pending"],
+        "history": [_row(a) for a in items if a.status != "pending"][:30],
+    })
+
+
+class ApprovalDecision(BaseModel):
+    approve: bool
+
+@app.post("/api/approvals/{action_id}/decide")
+async def api_approval_decide(action_id: str, req: ApprovalDecision) -> JSONResponse:
+    """Approve (and run) or reject — the same fix_registry path the Slack button uses."""
+    from agent.core import fix_registry
+    out = await fix_registry.decide(action_id, req.approve, user="dashboard")
+    return JSONResponse(out, status_code=404 if out["status"] == "not_found" else 200)
+
+
+# ── assistant (chat bubble) ───────────────────────────────────────────────────
+def _sse(events) -> StreamingResponse:
+    async def body():
+        try:
+            async for ev in events:
+                yield f"data: {json.dumps(ev, default=str)}\n\n"
+        except Exception as exc:   # never leave the UI hanging on a half-open stream
+            yield f"data: {json.dumps({'type': 'error', 'message': 'The assistant hit an error.', 'detail': str(exc)[:300]})}\n\n"
+    return StreamingResponse(body(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class ChatMessage(BaseModel):
+    session_id: str
+    message: str
+
+class ChatDecision(BaseModel):
+    session_id: str
+    tool_use_id: str
+    approve: bool
+
+@app.get("/api/chat/info")
+async def api_chat_info() -> JSONResponse:
+    from agent.dashboard import chat
+    try:
+        return JSONResponse(await chat.tools_info())
+    except Exception as exc:
+        return JSONResponse({"mutations_enabled": False, "tools": [], "error": str(exc)}, status_code=500)
+
+@app.post("/api/chat")
+async def api_chat(req: ChatMessage) -> StreamingResponse:
+    from agent.dashboard import chat
+    text = req.message.strip()
+    if not text:
+        raise HTTPException(400, "Empty message")
+    return _sse(chat.send(req.session_id, text[:4000]))
+
+@app.post("/api/chat/decide")
+async def api_chat_decide(req: ChatDecision) -> StreamingResponse:
+    from agent.dashboard import chat
+    return _sse(chat.decide(req.session_id, req.tool_use_id, req.approve))
+
+@app.delete("/api/chat/{session_id}")
+async def api_chat_clear(session_id: str) -> JSONResponse:
+    from agent.dashboard import chat
+    chat.clear(session_id)
+    return JSONResponse({"cleared": True})
 
 
 # ── SPA catch-all (must be last — only when dist/ is present) ─────────────────

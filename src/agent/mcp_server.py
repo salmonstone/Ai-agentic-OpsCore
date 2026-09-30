@@ -119,6 +119,11 @@ mcp = FastMCP("atlasos", transport_security=_transport_security())
 # way an explicit MCP_READONLY=0/1 wins.
 _READONLY = os.getenv("MCP_READONLY", "0" if _TRANSPORT == "stdio" else "1").strip() == "1"
 
+# Names of every tool declared with @_mutating_tool(), readonly or not — the
+# dashboard assistant reads this to decide which tool calls must stop for a
+# human Confirm click instead of running on the model's say-so.
+MUTATING_TOOLS: set[str] = set()
+
 
 def _mutating_tool():
     """Register a tool that has real side effects, EXCEPT in readonly mode.
@@ -135,6 +140,7 @@ def _mutating_tool():
     refusing to run.
     """
     def decorator(fn):
+        MUTATING_TOOLS.add(fn.__name__)
         if _READONLY:
             return fn
         return mcp.tool()(fn)

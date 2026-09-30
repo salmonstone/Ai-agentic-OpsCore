@@ -45,6 +45,13 @@ def _get_client() -> anthropic.AsyncAnthropic:
     return _client
 
 
+def client() -> anthropic.AsyncAnthropic:
+    """The shared Anthropic client, for callers that need an API chat() doesn't
+    cover — the dashboard assistant's streaming tool-use loop. Same key, same
+    process-wide singleton."""
+    return _get_client()
+
+
 async def chat(
     messages: list[dict],
     system: str = "",
