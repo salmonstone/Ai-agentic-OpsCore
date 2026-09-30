@@ -21,6 +21,7 @@ CPU_HIGH_PCT = 85.0
 MEM_HIGH_PCT = 90.0
 KUBE_SYSTEM_GRACE_SECONDS = 600  # 10 minutes
 NIGHTLY_HOUR = 1                  # nightly checks run at the first poll at/after 1 AM local
+_POD_WATCHER_ALERT_AFTER = 5      # consecutive failed 30s polls (~2.5 min) before alerting
 
 
 def nightly_due(now: datetime, done_date: str | None) -> bool:
@@ -89,16 +90,59 @@ class HealingDaemon:
 
     def _pod_watcher(self) -> None:
         from agent.integrations.kubectl import run_kubectl
+        consecutive_failures = 0
         while self.running:
             try:
                 res = run_kubectl(["get", "pods", "-A", "-o", "json"])
                 if res.success:
+                    if consecutive_failures >= _POD_WATCHER_ALERT_AFTER:
+                        self._notify_pod_watcher_recovered(consecutive_failures)
+                    consecutive_failures = 0
                     data = json.loads(res.output or "{}")
                     for pod in data.get("items", []):
                         self._inspect_pod(pod)
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures == _POD_WATCHER_ALERT_AFTER:
+                        self._notify_pod_watcher_down(res.error)
             except Exception as exc:
                 self.log.error("daemon.pod_watcher.error", error=str(exc))
             self._sleep(30)
+
+    def _notify_pod_watcher_down(self, error: str | None) -> None:
+        """Pod healing has failed every poll for _POD_WATCHER_ALERT_AFTER
+        cycles straight — kubectl isn't just having one bad tick, it's down.
+        Previously a failed poll here was silently skipped forever, so an
+        outage looked identical to "nothing to heal"."""
+        from agent.integrations import daemon_db
+
+        key = "daemon/pod_watcher_unreachable"
+        if daemon_db.check_cooldown(key, cooldown_minutes=30):
+            return
+        daemon_db.set_cooldown(key)
+        try:
+            from agent.integrations.slack import send_alert_generic
+            send_alert_generic(
+                title="Pod healing is blind",
+                message=(f"kubectl has failed {_POD_WATCHER_ALERT_AFTER} times in a row "
+                        f"(~{_POD_WATCHER_ALERT_AFTER * 30}s) — CrashLoop/OOM/ImagePull "
+                        f"healing is not running.\n*Last error:* "
+                        f"{(error or 'unknown')[:200]}"),
+                severity="warning",
+            )
+        except Exception as exc:
+            self.log.warning("daemon.pod_watcher.alert_failed", error=str(exc))
+
+    def _notify_pod_watcher_recovered(self, failed_for: int) -> None:
+        try:
+            from agent.integrations.slack import send_alert_generic
+            send_alert_generic(
+                title="Pod healing recovered",
+                message=f"kubectl is reachable again after {failed_for} failed polls.",
+                severity="info",
+            )
+        except Exception as exc:
+            self.log.warning("daemon.pod_watcher.recovery_alert_failed", error=str(exc))
 
     def _inspect_pod(self, pod: dict) -> None:
         meta = pod.get("metadata", {})

@@ -38,11 +38,15 @@ def _get_secret() -> bytes:
 
 
 def _verify_signature(body: bytes, sig_header: str) -> bool:
+    """Fails closed: with no GITHUB_WEBHOOK_SECRET configured, every request
+    is rejected — matching the Jenkins hook (`_verify_jenkins_token`), which
+    already refuses everything when its secret isn't set. Previously this
+    accepted any unsigned request as "dev mode", so anyone who knew the URL
+    could POST a fake push event and have it enqueued as a deploy."""
     secret = _get_secret()
     if not secret:
-        # No secret configured — allow in dev mode (set GITHUB_WEBHOOK_SECRET to enforce)
-        log.warning("webhook.signature.no_secret — accepting unsigned request")
-        return True
+        log.warning("webhook.signature.no_secret_configured — rejecting request")
+        return False
     if not sig_header or not sig_header.startswith("sha256="):
         return False
     expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
@@ -129,7 +133,7 @@ async def github_webhook(
     if not _verify_signature(body, x_hub_signature_256 or ""):
         log.warning(
             "webhook.signature.invalid",
-            event=x_github_event,
+            github_event=x_github_event,
             sig=x_hub_signature_256,
         )
         raise HTTPException(status_code=401, detail="Invalid signature")
@@ -279,17 +283,15 @@ async def jenkins_webhook(
 
 
 def _claim_jenkins_build(job: str, number: int) -> bool:
-    """True the first time a job+build is seen (within 7 days), else False."""
+    """True the first time a job+build is seen (within 7 days), else False.
+
+    One atomic check-and-set (`daemon_db.claim_once`) instead of a separate
+    check then set — a database error now fails closed (treated as already
+    claimed) instead of letting the build through as if it were unseen.
+    """
     from agent.integrations import daemon_db
 
-    key = f"jenkins_failure/{job}#{number}"
-    try:
-        if daemon_db.check_cooldown(key, cooldown_minutes=7 * 24 * 60):
-            return False
-        daemon_db.set_cooldown(key)
-    except Exception as exc:
-        log.warning("jenkins_webhook.dedupe_failed", error=str(exc))
-    return True
+    return daemon_db.claim_once(f"jenkins_failure/{job}#{number}", cooldown_minutes=7 * 24 * 60)
 
 
 _NON_FIX_ACTIONS = frozenset({"MANUAL_ONLY", "NO_ACTION_NEEDED"})
