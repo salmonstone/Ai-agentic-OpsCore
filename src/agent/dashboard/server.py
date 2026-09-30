@@ -519,10 +519,21 @@ def api_daemon_start() -> JSONResponse:
     if _daemon_running():
         return JSONResponse({"status": "already_running", "pid": _daemon_pid()})
     flags = (0x00000008 | 0x00000200) if sys.platform == "win32" else 0
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "agent.core.daemon"],
-        creationflags=flags,
-    )
+    # A detached process with no stdout/stderr dies at startup on Python 3.14,
+    # so give the daemon a log file (same fix as `agent dashboard start`).
+    log_path = Path("data/logs/daemon-dashboard.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "agent.core.daemon"],
+            stdin=subprocess.DEVNULL, stdout=log_file, stderr=log_file,
+            creationflags=flags,
+        )
+    import time as _time
+    _time.sleep(2)
+    if proc.poll() is not None:
+        tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-8:])
+        return JSONResponse({"status": "error", "error": f"daemon exited during startup (code {proc.returncode}): {tail}"})
     Path("data/daemon.pid").write_text(str(proc.pid))
     return JSONResponse({"status": "started", "pid": proc.pid})
 
