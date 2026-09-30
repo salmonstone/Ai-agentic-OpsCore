@@ -76,6 +76,23 @@ def test_jenkins_quiet_day(monkeypatch):
     assert ds._jenkins(NOW).status == "ok"
 
 
+def test_jenkins_unreachable_is_error_not_all_clear(monkeypatch):
+    """Found live: get_all_jobs() returns [] when Jenkins can't be reached (a
+    captive-portal 302), and the summary said "No failed builds · OK"."""
+    monkeypatch.setattr("agent.integrations.jenkins.get_all_jobs", lambda: [])
+    monkeypatch.setattr("agent.integrations.jenkins.get_connection_info",
+                        lambda: SimpleNamespace(connected=False, error="HTTP 302: captive portal"))
+    s = ds._jenkins(NOW)
+    assert s.status == "error" and "302" in s.lines[0]
+
+
+def test_jenkins_reachable_with_no_jobs_is_ok(monkeypatch):
+    monkeypatch.setattr("agent.integrations.jenkins.get_all_jobs", lambda: [])
+    monkeypatch.setattr("agent.integrations.jenkins.get_connection_info",
+                        lambda: SimpleNamespace(connected=True, error=None))
+    assert ds._jenkins(NOW).status == "ok"
+
+
 # --- github -------------------------------------------------------------------
 
 def test_github_counts_only_recent_failures(monkeypatch):

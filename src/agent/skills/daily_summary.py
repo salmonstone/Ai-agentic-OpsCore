@@ -73,6 +73,13 @@ def _jenkins(now: datetime) -> Section:
     from agent.integrations import jenkins as jk
 
     jobs = [j for j in jk.get_all_jobs() if not j.is_folder]
+    if not jobs:
+        # get_all_jobs() returns [] on any error, so "no jobs" can't be told
+        # apart from "couldn't reach Jenkins" without asking. Found live: an
+        # unreachable Jenkins was reported as "No failed builds · OK".
+        info = jk.get_connection_info()
+        if not info.connected:
+            return Section("Jenkins", "error", [f"Couldn't reach Jenkins: {(info.error or 'no response')[:150]}"])
     failed = []
     for j in jobs:
         for b in jk.get_build_history(j.name, count=10):

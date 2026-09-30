@@ -316,6 +316,20 @@ async def jenkins_auth_status() -> dict:
     return await asyncio.to_thread(_run)
 
 
+def _cluster_unreachable() -> dict | None:
+    """None when the API server answers; otherwise an explicit marker. The
+    kubectl list helpers return [] on any failure, so without this check an
+    outage reaches the model as "no pods" / "no nodes" and gets reported as
+    healthy (seen live: the dashboard assistant called a down cluster
+    "healthy"). k8s_scan has its own, older form of the same guard."""
+    from agent.integrations.kubectl import is_cluster_available
+    if is_cluster_available():
+        return None
+    return {"error": "cluster_unreachable",
+            "message": "Couldn't reach the Kubernetes API server, so nothing was checked. "
+                       "This is NOT an empty result — report it as unknown, never as healthy."}
+
+
 @mcp.tool()
 async def k8s_scan(namespace: str = "all") -> list[dict]:
     """Full Kubernetes cluster health scan across pods, nodes, and resources
@@ -353,6 +367,8 @@ async def k8s_list_pods(namespace: str = "all", status_filter: str | None = None
     def _run():
         from agent.integrations.kubectl import get_pods
 
+        if (down := _cluster_unreachable()):
+            return [down]
         pods = get_pods(namespace)
         if status_filter:
             pods = [p for p in pods if p.status.lower() == status_filter.lower()]
@@ -369,6 +385,8 @@ async def k8s_list_nodes() -> list[dict]:
     already calls for its node summary; this exposes it standalone."""
     def _run():
         from agent.integrations.kubectl import get_nodes_detail
+        if (down := _cluster_unreachable()):
+            return [down]
         return [n.model_dump() for n in get_nodes_detail()]
     return await asyncio.to_thread(_run)
 
@@ -385,6 +403,8 @@ async def k8s_pod_metrics(namespace: str = "all") -> list[dict]:
     """
     def _run():
         from agent.integrations.kubectl import get_pod_metrics
+        if (down := _cluster_unreachable()):
+            return [down]
         return [m.model_dump() for m in get_pod_metrics(namespace)]
     return await asyncio.to_thread(_run)
 
@@ -402,6 +422,8 @@ async def k8s_diagnose(pod_name: str, namespace: str) -> dict:
         from agent.integrations.kubectl import get_pods
         from agent.skills.k8s import K8sSkill
 
+        if (down := _cluster_unreachable()):
+            return down
         all_pods = get_pods(namespace)
         pod_info = next((p for p in all_pods if p.name == pod_name), None)
         if pod_info is None:
