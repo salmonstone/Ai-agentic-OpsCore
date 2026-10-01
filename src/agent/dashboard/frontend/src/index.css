@@ -9,14 +9,17 @@
 @import "@phosphor-icons/web/regular";
 
 :root {
-  --color-bg: #080b14;
-  --color-bg-2: #0c1020;
-  --color-surface: #11172a;
-  --color-surface-2: #161d35;
-  --color-text: #e8eaf4;
-  --color-accent: #6d6af2;
-  --color-accent-300: #a5a3ff;
-  --color-divider: color-mix(in srgb, #e8eaf4 10%, transparent);
+  /* A touch brighter than a true "Nocturne" black so content stays legible
+     under low ambient light (working at night) — still a real dark theme,
+     not a dimmed-down light one. */
+  --color-bg: #0e1424;
+  --color-bg-2: #141b31;
+  --color-surface: #1a2140;
+  --color-surface-2: #202849;
+  --color-text: #eef0f9;
+  --color-accent: #7a77f5;
+  --color-accent-300: #aeacff;
+  --color-divider: color-mix(in srgb, #eef0f9 14%, transparent);
 
   --font-heading: "Inter", system-ui, sans-serif;
   --font-body: "Inter", system-ui, sans-serif;
@@ -25,17 +28,17 @@
   --radius-sm: 4px;
   --radius-md: 10px;
   --radius-lg: 16px;
-  --shadow-sm: 0 0 0 1px #232a42;
-  --shadow-md: 0 0 0 1px #313a59, 0 8px 22px rgba(0,0,0,0.55);
-  --shadow-lg: 0 0 0 1px #454f73, 0 18px 44px rgba(0,0,0,0.65);
+  --shadow-sm: 0 0 0 1px #323c63;
+  --shadow-md: 0 0 0 1px #434f7d, 0 8px 22px rgba(0,0,0,0.5);
+  --shadow-lg: 0 0 0 1px #59648f, 0 18px 44px rgba(0,0,0,0.6);
 
   /* status — separate from the accent; "unk" = couldn't check, never OK */
-  --st-ok: oklch(0.76 0.17 150);
-  --st-warn: oklch(0.80 0.16 70);
-  --st-crit: oklch(0.66 0.21 25);
-  --st-unk: #7d84a3;
-  --term: color-mix(in srgb, #000 35%, var(--color-bg));
-  --muted: color-mix(in srgb, var(--color-text) 60%, transparent);
+  --st-ok: oklch(0.78 0.17 150);
+  --st-warn: oklch(0.81 0.16 72);
+  --st-crit: oklch(0.70 0.20 23);
+  --st-unk: #8d93b2;
+  --term: color-mix(in srgb, #000 30%, var(--color-bg));
+  --muted: color-mix(in srgb, var(--color-text) 68%, transparent);
   --hatch: repeating-linear-gradient(135deg, color-mix(in srgb, var(--st-unk) 14%, transparent) 0 5px, transparent 5px 11px);
   --rule: linear-gradient(to right, transparent, color-mix(in srgb, var(--color-text) 9%, transparent) 48px,
           color-mix(in srgb, var(--color-text) 9%, transparent) calc(100% - 48px), transparent);
