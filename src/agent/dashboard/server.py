@@ -1207,6 +1207,104 @@ def api_logs_jenkins(job: str, build: int, lines: int = 600) -> JSONResponse:
     return JSONResponse({"logs": redact(text)})
 
 
+# ── notification inbox ────────────────────────────────────────────────────────
+class MarkRead(BaseModel):
+    ids: list[str] | None = None        # None = mark everything read
+
+@app.get("/api/notifications")
+def api_notifications(limit: int = 50) -> JSONResponse:
+    from agent.integrations import notifications
+    return JSONResponse(notifications.list_recent(max(1, min(limit, 200))))
+
+@app.post("/api/notifications/read")
+def api_notifications_read(req: MarkRead) -> JSONResponse:
+    from agent.integrations import notifications
+    return JSONResponse({"marked": notifications.mark_read(req.ids)})
+
+
+# ── GitHub Actions ─────────────────────────────────────────────────────────────
+@app.get("/api/github/runs")
+def api_github_runs(repo: str = "", limit: int = 30) -> JSONResponse:
+    from agent.integrations import github_actions as gha
+    if not gha._token():
+        return JSONResponse({"configured": False, "runs": []})
+    try:
+        r = gha.resolve_repo(repo or None)
+        return JSONResponse({"configured": True, "repo": r,
+                             "runs": gha.list_runs(r, limit=max(1, min(limit, 100)), failed_only=False)})
+    except Exception as exc:
+        return JSONResponse({"configured": True, "repo": repo, "runs": [], "error": str(exc)[:300]})
+
+@app.get("/api/github/jobs")
+def api_github_jobs(repo: str, run_id: int) -> JSONResponse:
+    from agent.integrations import github_actions as gha
+    try:
+        return JSONResponse({"jobs": gha.get_failed_jobs(repo, run_id)})
+    except Exception as exc:
+        return JSONResponse({"jobs": [], "error": str(exc)[:300]}, status_code=502)
+
+@app.get("/api/github/job-log")
+def api_github_job_log(repo: str, job_id: int) -> JSONResponse:
+    from agent.dashboard.security import redact
+    from agent.integrations import github_actions as gha
+    try:
+        return JSONResponse({"logs": redact(gha.get_job_log(repo, job_id, tail_chars=80000))})
+    except Exception as exc:
+        return JSONResponse({"error": f"Couldn't fetch the job log: {str(exc)[:300]}"}, status_code=502)
+
+
+# ── AWS overview ──────────────────────────────────────────────────────────────
+# Identity first: if AWS can't be reached, nothing else is asked and the page
+# says "couldn't check". The inventory helpers return [] on API errors, so an
+# empty list is only shown as "none" after the identity call has succeeded.
+# Cost Explorer costs $0.01 a call and this makes several — cached 1h.
+_AWS_TTL_S = 3600
+_aws_cache: dict = {"at": 0.0, "data": None}
+
+@app.get("/api/aws/overview")
+async def api_aws_overview(force: bool = False) -> JSONResponse:
+    import time as _time
+    if not force and _aws_cache["data"] is not None and _time.time() - _aws_cache["at"] < _AWS_TTL_S:
+        return JSONResponse(_aws_cache["data"])
+
+    def _build():
+        from concurrent.futures import ThreadPoolExecutor
+        from agent.config import settings
+        from agent.integrations.aws import (
+            friendly_aws_error, get_all_ec2, get_all_load_balancers, get_all_rds, get_aws_client, get_elastic_ips,
+        )
+        region = settings.aws_region
+        try:
+            ident = get_aws_client("sts").get_caller_identity()
+        except Exception as exc:
+            return {"reachable": False, "region": region, "error": friendly_aws_error(exc)}
+
+        def inv(fn):
+            try:
+                return fn(region)
+            except Exception as exc:
+                return [{"error": str(exc)[:200]}]
+        with ThreadPoolExecutor(max_workers=2) as pool:      # boto3 is flaky with more (see aws_inventory)
+            ec2, rds, lbs, eips = pool.map(inv, [get_all_ec2, get_all_rds, get_all_load_balancers, get_elastic_ips])
+
+        from agent.integrations.aws_cost import get_cost_and_usage
+        cost = get_cost_and_usage(days=30)
+        cost_ok = bool(cost.get("by_service") or cost.get("daily"))
+        return {
+            "reachable": True, "region": region,
+            "identity": {"arn": ident.get("Arn", ""), "account": ident.get("Account", "")},
+            "cost": cost if cost_ok else None,
+            "cost_error": None if cost_ok else "Cost Explorer returned nothing (permission or billing access?)",
+            "inventory": {"ec2": ec2, "rds": rds, "load_balancers": lbs, "elastic_ips": eips},
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    data = await asyncio.get_event_loop().run_in_executor(None, _build)
+    if data.get("reachable"):
+        _aws_cache.update(data=data, at=_time.time())
+    return JSONResponse(data)
+
+
 # ── SPA catch-all (must be last — only when dist/ is present) ─────────────────
 if _DIST.exists():
     @app.get("/{full_path:path}")

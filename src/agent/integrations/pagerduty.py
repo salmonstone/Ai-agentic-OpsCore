@@ -178,6 +178,14 @@ def page_oncall(
     pd_key = _pd_key()
     og_key = _og_key()
 
+    try:   # dashboard inbox — an escalation is recorded even with no pager configured
+        from agent.integrations.notifications import record
+        record(f"Escalated: {title}", body, "critical", "page",
+               {"provider": "pagerduty" if pd_key else "opsgenie" if og_key else "none (not configured)",
+                "incident_id": incident_id, "Service": service})
+    except Exception:
+        pass
+
     if not pd_key and not og_key:
         log.warning("oncall.no_provider_configured")
         return {"provider": "none", "success": False, "skipped": True}

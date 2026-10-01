@@ -20,6 +20,14 @@ def _no_real_dashboard_token(monkeypatch):
     monkeypatch.setattr(security, "_keychain_token", lambda: _fake_keychain_token())
 
 
+@pytest.fixture(autouse=True)
+def _isolated_notification_inbox(tmp_path, monkeypatch):
+    """Every Slack/page/incident alert is now also recorded in the inbox —
+    keep tests from writing into the real data/notifications.db."""
+    from agent.integrations import notifications
+    monkeypatch.setattr(notifications, "_DB_PATH", tmp_path / "notifications.db")
+
+
 def _fake_keychain_token() -> str:
     """Only a test's in-memory FakeKeyring counts; the real keychain is ignored."""
     from agent.core import secrets as sec

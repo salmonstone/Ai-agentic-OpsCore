@@ -27,6 +27,18 @@ _ALERT_LABEL = {
 }
 
 
+def _inbox(title: str, message: str = "", severity: str = "info", kind: str = "alert",
+           meta: dict | None = None) -> None:
+    """Record the alert in the dashboard's notification inbox — called before
+    the "is Slack configured?" check, so the dashboard gets every alert even
+    with Slack off. Never raises."""
+    try:
+        from agent.integrations.notifications import record
+        record(title, message, severity, kind, meta)
+    except Exception:
+        pass
+
+
 def _webhook_url() -> str:
     try:
         from agent.config import settings
@@ -59,6 +71,7 @@ def send_alert_generic(
     fix_command: str | None = None,
 ) -> bool:
     """Send a rich Block Kit alert for any event type. Returns True if sent."""
+    _inbox(title, message, severity, "alert", {**(fields or {}), **({"fix_command": fix_command} if fix_command else {})})
     url = _webhook_url()
     if not url:
         return False
@@ -129,6 +142,12 @@ def send_alert_generic(
 
 def send_alert_blocks(blocks: list[dict]) -> bool:
     """Send pre-built Block Kit blocks directly."""
+    try:
+        from agent.integrations.notifications import title_from_blocks
+        headline = title_from_blocks(blocks)
+    except Exception:
+        headline = "AtlasOS message"
+    _inbox(headline, "", "info", "summary" if "summary" in headline.lower() else "alert")
     url = _webhook_url()
     if not url:
         return False
@@ -143,6 +162,7 @@ def send_alert_blocks(blocks: list[dict]) -> bool:
 
 def send_resolved_generic(title: str, detail: str = "") -> bool:
     """Send a green 'RESOLVED' notification."""
+    _inbox(f"Resolved: {title}", detail, "ok", "resolved")
     url = _webhook_url()
     if not url:
         return False
@@ -204,6 +224,11 @@ def test_connection() -> bool:
 
 def send_alert(alert: ResourceAlert) -> bool:
     """Send a single resource alert to Slack. Silent no-op if webhook not set."""
+    _target = f"{alert.namespace}/{alert.pod_or_node}" if alert.namespace else alert.pod_or_node
+    _inbox(f"{_ALERT_LABEL.get(alert.alert_type, alert.alert_type)}: {_target}",
+           f"{alert.current_usage} of {alert.limit} ({alert.percent_used}%). {alert.recommendation}",
+           alert.severity, "alert",
+           {"Namespace": alert.namespace, "Resource": alert.pod_or_node, "fix_command": alert.fix_command})
     url = _webhook_url()
     if not url:
         return False
@@ -253,6 +278,8 @@ def send_alert(alert: ResourceAlert) -> bool:
 
 def send_recovery(pod_or_node: str, namespace: str = "") -> bool:
     """Notify Slack that a previously critical resource is now healthy."""
+    _inbox(f"Recovered: {namespace + '/' if namespace else ''}{pod_or_node}", "", "ok", "resolved",
+           {"Namespace": namespace, "Resource": pod_or_node})
     url = _webhook_url()
     if not url:
         return False
@@ -287,6 +314,9 @@ def send_deploy_approval_request(pending) -> bool:
     SLACK_SIGNING_SECRET set so the /slack/actions callback can be verified.
     Returns True if sent.
     """
+    _inbox(f"Deploy waiting for approval: {getattr(pending, 'deployment', '') or getattr(pending, 'id', '')}",
+           f"{getattr(pending, 'new_image', '')} → {getattr(pending, 'namespace', '')}", "warning", "approval",
+           {"deploy_id": getattr(pending, "id", "")})
     url = _webhook_url()
     if not url:
         return False
@@ -429,6 +459,8 @@ def send_action_approval_request(action) -> bool:
     send_deploy_approval_request: a Slack App with Interactivity enabled,
     its Request URL pointing at this server's /slack/actions.
     """
+    _inbox("Fix waiting for your approval", getattr(action, "summary", ""), "warning", "approval",
+           {"approval_id": getattr(action, "id", ""), "kind": getattr(action, "kind", "")})
     url = _webhook_url()
     if not url:
         return False

@@ -4,6 +4,8 @@ export const NAV = [
   { id: 'overview', label: 'Overview', icon: 'ph-squares-four' },
   { id: 'cluster', label: 'Cluster', icon: 'ph-cube' },
   { id: 'jenkins', label: 'Jenkins', icon: 'ph-hammer' },
+  { id: 'github', label: 'GitHub Actions', icon: 'ph-github-logo' },
+  { id: 'aws', label: 'AWS', icon: 'ph-cloud' },
   { id: 'approvals', label: 'Approvals', icon: 'ph-seal-check' },
   { id: 'incidents', label: 'Incidents & SLOs', icon: 'ph-siren' },
   { id: 'commands', label: 'Command Runner', icon: 'ph-terminal-window' },

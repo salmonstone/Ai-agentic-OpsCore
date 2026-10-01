@@ -109,6 +109,58 @@ const DEMO = {
     }
     return { labels, data }
   },
+  notifications: () => ({
+    unread: 3,
+    items: [
+      { id: 'n1', created_at: iso(4 * M), severity: 'warning', kind: 'approval', title: 'Fix waiting for your approval', message: 'Restart deployment api in namespace prod', meta: {}, read: false },
+      { id: 'n2', created_at: iso(6 * M), severity: 'critical', kind: 'alert', title: 'CrashLoopBackOff: prod/api-7f9c-x2kqd', message: '14 restarts in 2h — exits with "password authentication failed"', meta: { Namespace: 'prod', Resource: 'api-7f9c-x2kqd' }, read: false },
+      { id: 'n3', created_at: iso(3 * H), severity: 'warning', kind: 'alert', title: 'Jenkins build failed', message: 'infragpt #22 failed. Cause: Helm ingress conflict. Needs a manual fix.', meta: {}, read: false },
+      { id: 'n4', created_at: iso(5 * H), severity: 'ok', kind: 'resolved', title: 'Recovered: data/etl-runner', message: '', meta: { Namespace: 'data' }, read: true },
+      { id: 'n5', created_at: iso(9 * H), severity: 'info', kind: 'summary', title: '☀️ AtlasOS daily summary — Wed 01 Oct', message: '', meta: {}, read: true },
+    ],
+  }),
+  github: () => {
+    const r = (id, n, wf, title, branch, conclusion, ago_, status = 'completed') => ({ id, run_number: n, workflow: wf, title, branch, event: 'push', status, conclusion, sha: Math.random().toString(16).slice(2, 9), created_at: iso(ago_), url: '' })
+    return {
+      configured: true, repo: 'salmonstone/Ai-agentic-OpsCore',
+      runs: [
+        r(9101, 212, 'CI', 'feat(dashboard): settings & logs', 'feat/dashboard-redesign', null, 3 * M, 'in_progress'),
+        r(9100, 211, 'CI', 'fix(dashboard): token without restart', 'feat/dashboard-redesign', 'success', 40 * M),
+        r(9099, 210, 'Docker', 'fix(dashboard): token without restart', 'feat/dashboard-redesign', 'success', 41 * M),
+        r(9098, 209, 'CI', 'wip: flaky retry test', 'tmp/retry', 'failure', 5 * H),
+        r(9097, 208, 'CI', 'feat(summary): daily Slack summary', 'main', 'success', 20 * H),
+        r(9096, 207, 'Docker', 'feat(summary): daily Slack summary', 'main', 'success', 20 * H),
+        r(9095, 206, 'CI', 'feat(github): diagnose failed runs', 'main', 'success', 2 * D),
+        r(9094, 205, 'CI', 'chore: bump deps', 'deps/bump', 'cancelled', 3 * D),
+      ],
+    }
+  },
+  aws: () => {
+    const daily = DEMO.spend().daily
+    return {
+      reachable: true, region: 'ap-south-1', generated_at: iso(12 * M),
+      identity: { arn: 'arn:aws:iam::123456789012:user/demo', account: '123456789012' },
+      cost: {
+        total: 390.1, month_to_date: 13.4, forecast: 402.0, last_month: 371.2, month_change_pct: 5,
+        by_service: { 'Amazon Elastic Compute Cloud - Compute': 186.2, 'Amazon Elastic Kubernetes Service': 72.0, 'EC2 - Other': 48.3, 'Amazon Relational Database Service': 39.5, 'Amazon Simple Storage Service': 14.1, 'Elastic Load Balancing': 18.6, 'AmazonCloudWatch': 7.2, 'Amazon Route 53': 1.5, 'AWS Key Management Service': 1.0 },
+        daily,
+      },
+      inventory: {
+        ec2: [
+          { id: 'i-0a3f9c21', name: 'eks-node-1', instance_type: 't3.large', state: 'running', private_ip: '10.0.12.41', public_ip: '', availability_zone: 'ap-south-1a' },
+          { id: 'i-0b77d1e4', name: 'eks-node-2', instance_type: 't3.large', state: 'running', private_ip: '10.0.14.7', public_ip: '', availability_zone: 'ap-south-1b' },
+          { id: 'i-0c19aa03', name: 'jenkins', instance_type: 't3.medium', state: 'running', private_ip: '10.0.3.9', public_ip: '13.232.0.10', availability_zone: 'ap-south-1a' },
+          { id: 'i-0d55e2b8', name: 'old-bastion', instance_type: 't2.micro', state: 'stopped', private_ip: '10.0.1.4', public_ip: '', availability_zone: 'ap-south-1a' },
+        ],
+        rds: [{ id: 'prod-postgres', engine: 'postgres', engine_version: '16.3', instance_class: 'db.t4g.medium', status: 'available', is_healthy: true, allocated_storage: 100, multi_az: true }],
+        load_balancers: [{ name: 'k8s-prod-ingress', type: 'application', state: 'active', is_healthy: true, healthy_targets: 3, total_targets: 3, dns_name: 'k8s-prod-ingress-123.ap-south-1.elb.amazonaws.com' }],
+        elastic_ips: [
+          { allocation_id: 'eipalloc-1', public_ip: '13.232.0.10', name: 'jenkins', is_attached: true, instance_id: 'i-0c19aa03' },
+          { allocation_id: 'eipalloc-2', public_ip: '3.110.45.2', name: 'old-bastion-ip', is_attached: false },
+        ],
+      },
+    }
+  },
   spend: () => {
     const base = [12.1, 12.4, 12.8, 13.1, 12.6, 12.2, 11.9, 12.3, 12.7, 13.0, 12.5, 12.4, 12.9, 13.2, 12.6,
       12.1, 12.0, 12.8, 21.7, 13.1, 12.7, 12.4, 12.6, 12.9, 13.3, 12.8, 12.6, 13.9, 13.4, 13.1]

@@ -89,6 +89,12 @@ def _send_incident_slack(
     cause: str,
 ) -> str:
     """Send a rich Block Kit incident message. Returns thread_ts (empty for webhooks)."""
+    try:   # dashboard inbox — recorded even when Slack isn't configured
+        from agent.integrations.notifications import record
+        record(f"Incident opened: {title}", cause, severity if severity in ("critical", "warning") else "warning",
+               "incident", {"incident_id": incident_id, "Service": service, "Namespace": namespace})
+    except Exception:
+        pass
     url = _webhook_url()
     if not url:
         return ""

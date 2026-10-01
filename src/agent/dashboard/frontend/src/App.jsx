@@ -9,6 +9,9 @@ import Commands from './ui/Commands'
 import { Icon } from './ui/common'
 import Incidents from './ui/Incidents'
 import Jenkins from './ui/Jenkins'
+import Aws from './ui/Aws'
+import GitHub from './ui/GitHub'
+import Inbox from './ui/Inbox'
 import Login from './ui/Login'
 import LogViewer from './ui/LogViewer'
 import Settings from './ui/Settings'
@@ -21,6 +24,8 @@ const TITLES = {
   overview: ['Overview', 'Everything AtlasOS watches, at a glance'],
   cluster: ['Cluster', 'Nodes, problem pods, and what the daemon healed'],
   jenkins: ['Jenkins', 'Builds and failures'],
+  github: ['GitHub Actions', 'Workflow runs, failures and their logs'],
+  aws: ['AWS', 'Spend, and every resource in your region'],
   approvals: ['Approvals', 'Fixes waiting for a human — the same queue as Slack'],
   incidents: ['Incidents & SLOs', 'Open incidents and error budgets'],
   commands: ['Command Runner', 'Every agent CLI command, with its options'],
@@ -78,6 +83,18 @@ function JenkinsPanel({ refreshKey, onAsk, onLogs }) {
   const builds = useData('jenkins', '/api/jenkins/builds', 60000)
   useRefresh(builds, refreshKey)
   return <Jenkins builds={builds} onAsk={onAsk} onLogs={onLogs} />
+}
+function GitHubPanel({ refreshKey, onAsk, onLogs }) {
+  const [repo, setRepo] = useState(() => load('atlas-gh-repo', ''))
+  useEffect(() => { save('atlas-gh-repo', repo) }, [repo])
+  const runs = useData('github', `/api/github/runs?repo=${encodeURIComponent(repo)}&limit=40`, 60000)
+  useRefresh(runs, refreshKey)
+  return <GitHub runs={runs} repo={repo} setRepo={setRepo} onAsk={onAsk} onLogs={onLogs} />
+}
+function AwsPanel({ refreshKey, onAsk }) {
+  const aws = useData('aws', '/api/aws/overview')
+  useRefresh(aws, refreshKey)
+  return <Aws aws={aws} onAsk={onAsk} onRefresh={() => aws.reload('/api/aws/overview?force=true')} />
 }
 function IncidentsPanel({ refreshKey, onAsk }) {
   const incidents = useData('incidents', '/api/incidents', 30000)
@@ -277,6 +294,7 @@ function Shell() {
               <div className="muted" style={{ fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{panel === 'cluster' ? context || sub : sub}</div>
             </div>
             {panel === 'cluster' && <ContextSwitcher clusters={clusters} demo={demo} onSwitched={() => { clusters.reload(); setRefreshKey(k => k + 1) }} />}
+            <Inbox onNav={setPanel} demo={demo} />
             <button className="btn btn-secondary" onClick={() => setPaletteOpen(true)} style={{ padding: '5px 10px', fontSize: 12.5, color: 'var(--muted)' }} title="Command palette">
               <Icon name="ph-magnifying-glass" />{mobile ? '' : 'Search'}<kbd className="mono" style={{ fontSize: 10.5, padding: '0 5px', borderRadius: 4, border: '1px solid var(--color-divider)' }}>Ctrl K</kbd>
             </button>
@@ -310,6 +328,8 @@ function Shell() {
           {panel === 'overview' && <Overview summary={summary} actions={actions} chart={chart} spend={spend} live={live} onNav={setPanel} onRun={runQuick} daemonRunning={!!live?.stats?.daemon_running} />}
           {panel === 'cluster' && <ClusterPanel refreshKey={refreshKey} onAsk={ask} onConnected={() => clusters.reload()} onLogs={setLogSource} />}
           {panel === 'jenkins' && <JenkinsPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
+          {panel === 'github' && <GitHubPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
+          {panel === 'aws' && <AwsPanel refreshKey={refreshKey} onAsk={ask} />}
           {panel === 'settings' && <Settings key={refreshKey} live={live} context={context} onNav={setPanel} onLogs={setLogSource} />}
           {panel === 'approvals' && <Approvals approvals={approvals} deploys={deploys} onChanged={() => { approvals.reload(); deploys.reload() }} />}
           {panel === 'incidents' && <IncidentsPanel refreshKey={refreshKey} onAsk={ask} />}

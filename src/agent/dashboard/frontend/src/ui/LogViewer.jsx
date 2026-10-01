@@ -21,6 +21,19 @@ export const logSources = {
     },
     ask: `Diagnose Jenkins build ${job} #${build}. What's the root cause and can it be fixed automatically?`,
   }),
+  github: (repo, runId, workflow) => ({
+    title: `${workflow || 'run'} · ${runId}`, sub: `GitHub Actions · ${repo} · failed jobs`, icon: 'ph-github-logo',
+    load: async () => {
+      const { jobs = [] } = await getJSON(`/api/github/jobs?repo=${encodeURIComponent(repo)}&run_id=${runId}`)
+      if (!jobs.length) return [{ id: 'none', label: 'Logs', text: '', empty: 'No failed jobs in this run.' }]
+      return Promise.all(jobs.slice(0, 6).map(async j => {
+        const r = await getJSON(`/api/github/job-log?repo=${encodeURIComponent(repo)}&job_id=${j.id}`)
+        const head = j.failed_steps?.length ? `# failed step(s): ${j.failed_steps.join(', ')}\n` : ''
+        return { id: String(j.id), label: j.name, text: head + (r.logs || '') }
+      }))
+    },
+    ask: `Diagnose GitHub Actions run ${runId} in ${repo}. What failed and how do I fix it?`,
+  }),
   system: (name, label) => ({
     title: label, sub: 'AtlasOS log', icon: 'ph-scroll',
     load: async () => {
