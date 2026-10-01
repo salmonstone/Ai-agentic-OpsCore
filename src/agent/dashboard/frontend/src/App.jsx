@@ -80,6 +80,37 @@ function useWidth() {
   return w
 }
 
+const CHAT_W_MIN = 320, CHAT_W_MAX = 640, CHAT_W_DEFAULT = 388
+
+/** Draggable width for the docked assistant panel: drag the handle on its
+ *  left edge, double-click to reset, remembered across visits. */
+function useResizableWidth(storageKey, initial, min, max) {
+  const [width, setWidth] = useState(() => {
+    const v = parseInt(load(storageKey, String(initial)), 10)
+    return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : initial
+  })
+  useEffect(() => { save(storageKey, String(width)) }, [storageKey, width])
+  const onMouseDown = useCallback(e => {
+    e.preventDefault()
+    const startX = e.clientX, startWidth = width
+    const handle = e.currentTarget
+    handle.classList.add('dragging')
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    const onMove = ev => setWidth(Math.min(max, Math.max(min, startWidth + (startX - ev.clientX))))
+    const onUp = () => {
+      handle.classList.remove('dragging')
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [width, min, max])
+  return [width, onMouseDown, setWidth]
+}
+
 /** Re-fetch whenever the header Refresh button bumps `refreshKey`. */
 function useRefresh(poll, refreshKey) {
   const first = useRef(true)
@@ -191,7 +222,7 @@ function DemoSwitch({ demo, onToggle }) {
  *  cluster context, notifications, and a settings shortcut in place of a
  *  fabricated user identity (the dashboard has one shared login, not
  *  per-user accounts). */
-function TopBar({ mobile, onOpenNav, onOpenPalette, version, panel, clusters, demo, onClustersChanged, onNav }) {
+function TopBar({ mobile, onOpenNav, onOpenPalette, version, clusters, demo, onClustersChanged, onNav }) {
   return (
     <header style={{
       position: 'sticky', top: 0, zIndex: 50, height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', gap: 14,
@@ -255,6 +286,7 @@ function Shell() {
   const width = useWidth()
   const mobile = width < 900
   const dock = width >= 1340 && !mobile   // wide enough to dock the assistant as a third column
+  const [chatWidth, onChatResizeStart, setChatWidth] = useResizableWidth('atlas-chat-width', CHAT_W_DEFAULT, CHAT_W_MIN, CHAT_W_MAX)
 
   const live = useLive(demo)
   // Shell renders the DemoCtx provider, so its own hooks get `demo` passed in.
@@ -354,10 +386,10 @@ function Shell() {
     <DemoCtx.Provider value={demo}>
       <div style={{ '--topbar-h': `${TOPBAR_H}px`, minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
         <TopBar mobile={mobile} onOpenNav={() => setNavOpen(true)} onOpenPalette={() => setPaletteOpen(true)}
-          version={about.data?.version} panel={panel} clusters={clusters} demo={demo} onNav={setPanel}
+          version={about.data?.version} clusters={clusters} demo={demo} onNav={setPanel}
           onClustersChanged={() => { clusters.reload(); setRefreshKey(k => k + 1) }} />
 
-        <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'minmax(0, 1fr)' : showChatPanel ? '216px minmax(0, 1fr) 388px' : '216px minmax(0, 1fr)', flex: 1, minHeight: 0 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'minmax(0, 1fr)' : showChatPanel ? `216px minmax(0, 1fr) ${chatWidth}px` : '216px minmax(0, 1fr)', flex: 1, minHeight: 0 }}>
           {!mobile && sidebar}
           {mobile && navOpen && (
             <>
@@ -429,8 +461,19 @@ function Shell() {
           </main>
 
           {showChatPanel && (
-            <ChatWidget variant="panel" open setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
-              incidents={incidents} onNav={setPanel} />
+            <div style={{ position: 'sticky', top: 'var(--topbar-h)', height: 'calc(100vh - var(--topbar-h))', minWidth: 0 }}>
+              <div className="chat-resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize assistant panel"
+                aria-valuenow={chatWidth} aria-valuemin={CHAT_W_MIN} aria-valuemax={CHAT_W_MAX} tabIndex={0}
+                onMouseDown={onChatResizeStart} onDoubleClick={() => setChatWidth(CHAT_W_DEFAULT)}
+                onKeyDown={e => {
+                  if (e.key === 'ArrowLeft') setChatWidth(w => Math.min(CHAT_W_MAX, w + 24))
+                  if (e.key === 'ArrowRight') setChatWidth(w => Math.max(CHAT_W_MIN, w - 24))
+                }}
+                style={{ position: 'absolute', left: -4, top: 0, bottom: 0, width: 8, cursor: 'col-resize', zIndex: 20 }}
+                title="Drag to resize · double-click to reset" />
+              <ChatWidget variant="panel" open setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
+                incidents={incidents} onNav={setPanel} />
+            </div>
           )}
         </div>
 
