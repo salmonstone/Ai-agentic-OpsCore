@@ -3,7 +3,6 @@ import { postJSON, usePoll } from '../lib/api'
 import { useDemo } from '../lib/demo'
 import { tone } from '../lib/tone'
 import { Icon, NoData, Section, SectionHead, SkeletonRows } from './common'
-import { logSources } from './LogViewer'
 
 const STATUS = {
   ok: ['ok', 'Connected', 'ph-check-circle'],
@@ -155,10 +154,9 @@ function IntegrationCard({ integ, status, canSave, blockedReason, onSaved, onChe
   )
 }
 
-export default function Settings({ live, context, onNav, onLogs }) {
+export default function Settings({ live, context, onNav }) {
   const demo = useDemo()
   const settings = usePoll('/api/settings')
-  const sysLogs = usePoll('/api/logs/system')
   const [status, setStatus] = useState({})
 
   const check = useCallback(async id => {
@@ -210,19 +208,9 @@ export default function Settings({ live, context, onNav, onLogs }) {
             </div>
           </Section>
 
-          <Section>
-            <SectionHead title="AtlasOS logs" note="credentials are masked" />
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 8 }}>
-              {(sysLogs.data?.logs || []).map(l => (
-                <button key={l.name} className="hoverable" disabled={!l.exists} onClick={() => onLogs(logSources.system(l.name, l.label))}
-                  style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'var(--color-surface)', textAlign: 'left', opacity: l.exists ? 1 : 0.5 }}>
-                  <Icon name="ph-scroll" size={17} style={{ color: 'var(--color-accent)' }} />
-                  <span style={{ flex: 1, fontSize: 13 }}>{l.label}</span>
-                  {!l.exists && <span className="muted" style={{ fontSize: 11 }}>no file yet</span>}
-                </button>
-              ))}
-            </div>
-          </Section>
+          <div className="muted" style={{ fontSize: 12 }}>
+            AtlasOS's own logs, services and backups are on the <a href="#system" onClick={e => { e.preventDefault(); onNav('system') }}>System</a> page.
+          </div>
         </>
       )}
     </div>

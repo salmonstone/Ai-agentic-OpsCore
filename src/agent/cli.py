@@ -12594,8 +12594,10 @@ def incident_resolve(
         return
 
     cause = note or "manually resolved"
-    incident_db.resolve_incident(inc["id"], auto_fixed=False, note=cause)
-    incident_db.add_event(inc["id"], "resolved", detail=cause)
+    # Shared path (skills/incident.py): also closes the on-call page and ends
+    # the SLO burn, which this command used to skip.
+    from agent.skills.incident import resolve_incident as _resolve
+    _resolve(inc["id"], cause=cause, auto_fixed=False)
     console.print(f"[green]✅ Incident {inc['id'][:8]} resolved.[/green]")
     console.print()
 
@@ -13986,7 +13988,9 @@ def events_retry(
             raise typer.Exit(1)
         target = matches[0]
 
-    retry_dead(target)
+    if not retry_dead(target):
+        console.print(f"[red]Event {target[:8]} isn't a dead event — nothing requeued.[/red]")
+        raise typer.Exit(1)
     console.print(f"[green]✓ Event {target[:8]} requeued — the worker will pick it up shortly.[/green]")
     console.print()
 

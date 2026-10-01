@@ -169,9 +169,11 @@ def add_fix_attempt(incident_id: str, action: str, success: bool) -> None:
 # Resolve
 # ---------------------------------------------------------------------------
 
-def resolve_incident(incident_id: str, cause: str = "auto-healed") -> None:
-    """Mark an incident resolved and notify Slack."""
-    incident_db.resolve_incident(incident_id, auto_fixed=True, note=cause)
+def resolve_incident(incident_id: str, cause: str = "auto-healed", auto_fixed: bool = True) -> None:
+    """Mark an incident resolved, notify Slack and the dashboard inbox, close
+    the on-call page, and end its SLO burn. The one resolve path for the
+    healer (auto_fixed=True) and a human (CLI / dashboard, auto_fixed=False)."""
+    incident_db.resolve_incident(incident_id, auto_fixed=auto_fixed, note=cause)
     incident_db.add_event(incident_id, "resolved", detail=cause)
 
     inc = incident_db.get_incident(incident_id)
@@ -179,6 +181,21 @@ def resolve_incident(incident_id: str, cause: str = "auto-healed") -> None:
     duration = inc.get("duration_sec", 0) if inc else 0
     minutes  = round(duration / 60.0, 1)
     _send_followup(f"✅ RESOLVED: {title} — Duration: {minutes}min", "#00AA00")
+    try:
+        from agent.integrations.notifications import record
+        record(f"Resolved: {title}", f"{cause} · open for {minutes} min", "ok", "resolved",
+               {"incident_id": incident_id})
+    except Exception:
+        pass
+
+    # Close the PagerDuty/OpsGenie page too — pages use the incident id as their
+    # dedup key, and previously stayed open after the incident was resolved.
+    try:
+        from agent.integrations.pagerduty import resolve_oncall
+        if resolve_oncall(incident_id):
+            incident_db.add_event(incident_id, "page_resolved", detail="on-call page closed")
+    except Exception as exc:
+        log.warning("incident.resolve_oncall_failed", error=str(exc))
 
     # End the SLO burn (charge the incident's downtime against the budget).
     try:
@@ -195,6 +212,18 @@ def resolve_incident(incident_id: str, cause: str = "auto-healed") -> None:
 # ---------------------------------------------------------------------------
 # Escalate
 # ---------------------------------------------------------------------------
+
+def acknowledge_incident(incident_id: str, who: str = "dashboard") -> bool:
+    """Record that a human has seen the incident and is on it. The incident
+    stays open (acknowledged is a timeline event, not a status). Returns
+    False if the incident doesn't exist or is already resolved."""
+    inc = incident_db.get_incident(incident_id)
+    if not inc or inc.get("status") == "resolved":
+        return False
+    incident_db.add_event(incident_id, "acknowledged", detail=f"by {who}")
+    _send_followup(f"👀 ACKNOWLEDGED by {who}: {inc.get('title', incident_id)}", "#3366CC")
+    return True
+
 
 def escalate_incident(incident_id: str, reason: str) -> None:
     """Escalate an incident to a human and notify Slack."""

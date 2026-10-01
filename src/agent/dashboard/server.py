@@ -1305,6 +1305,115 @@ async def api_aws_overview(force: bool = False) -> JSONResponse:
     return JSONResponse(data)
 
 
+# ── incident actions ──────────────────────────────────────────────────────────
+class ResolveIncident(BaseModel):
+    note: str = ""
+
+@app.get("/api/incidents/{incident_id}")
+def api_incident(incident_id: str) -> JSONResponse:
+    from agent.integrations import incident_db
+    inc = incident_db.get_incident(incident_id)
+    if inc is None:
+        raise HTTPException(404, "No such incident")
+    return JSONResponse(inc)
+
+@app.post("/api/incidents/{incident_id}/ack")
+def api_incident_ack(incident_id: str) -> JSONResponse:
+    from agent.skills.incident import acknowledge_incident
+    if not acknowledge_incident(incident_id, who="dashboard"):
+        raise HTTPException(409, "Incident not found or already resolved")
+    return JSONResponse({"acknowledged": True})
+
+@app.post("/api/incidents/{incident_id}/resolve")
+def api_incident_resolve(incident_id: str, req: ResolveIncident) -> JSONResponse:
+    """Same path as `agent incident resolve`: closes the on-call page and
+    ends the SLO burn too (skills/incident.resolve_incident)."""
+    from agent.integrations import incident_db
+    from agent.skills.incident import resolve_incident
+    inc = incident_db.get_incident(incident_id)
+    if inc is None:
+        raise HTTPException(404, "No such incident")
+    if inc.get("status") == "resolved":
+        return JSONResponse({"resolved": True, "already": True})
+    resolve_incident(incident_id, cause=(req.note.strip() or "resolved from the dashboard")[:500], auto_fixed=False)
+    return JSONResponse({"resolved": True})
+
+
+# ── System page: AtlasOS's own health ─────────────────────────────────────────
+_SERVER_STARTED = datetime.now(timezone.utc).isoformat()
+
+@app.get("/api/system")
+def api_system() -> JSONResponse:
+    from agent.core import backup as bk
+    from agent.core import supervisor as sv
+    from agent.integrations import event_queue as eq
+
+    try:
+        sup_state = json.loads(Path(sv.STATE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        sup_state = {}
+    sup_pid = sv.running_supervisor_pid()
+
+    try:
+        queue = eq.get_stats()
+        pending = eq.list_events(status="pending", limit=200)
+        oldest = min((e.get("created_at") for e in pending if e.get("created_at")), default=None)
+        dead = eq.list_events(status="dead", limit=20)
+        queue_out = {"stats": queue, "oldest_pending": oldest,
+                     "dead": [{k: e.get(k) for k in ("id", "event_type", "error", "retry_count", "created_at")} for e in dead]}
+    except Exception as exc:
+        queue_out = {"error": str(exc)[:300]}
+
+    try:
+        backups = [{"name": b.name, "created": b.created.isoformat(), "size": b.size, "pre_restore": b.pre_restore}
+                   for b in bk.list_backups()][:20]
+        backup_out = {"dir": str(bk.backup_dir()), "items": backups}
+    except Exception as exc:
+        backup_out = {"error": str(exc)[:300], "items": []}
+
+    return JSONResponse({
+        "dashboard": {"pid": os.getpid(), "started": _SERVER_STARTED, "python": sys.version.split()[0]},
+        "supervisor": {"running": bool(sup_pid), "pid": sup_pid, "updated": sup_state.get("updated"),
+                       "services": sup_state.get("services", {}) if sup_pid else {}},
+        "daemon": _daemon_status_dict(),
+        "queue": queue_out,
+        "backups": backup_out,
+    })
+
+@app.post("/api/system/backup")
+async def api_system_backup() -> JSONResponse:
+    from agent.core import backup as bk
+    try:
+        info = await asyncio.get_event_loop().run_in_executor(None, bk.create_backup)
+    except Exception as exc:
+        return JSONResponse({"detail": f"Backup failed: {exc}"}, status_code=500)
+    return JSONResponse({"name": info.name, "size": info.size, "created": info.created.isoformat()})
+
+class BackupName(BaseModel):
+    name: str
+
+@app.post("/api/system/backup/verify")
+async def api_system_backup_verify(req: BackupName) -> JSONResponse:
+    from agent.core import backup as bk
+    # Only names from the backup list — backup.resolve() would also accept any
+    # file path on the machine, which a web endpoint must not.
+    known = {b.name: b.path for b in bk.list_backups()}
+    if req.name not in known:
+        raise HTTPException(404, "No such backup")
+    try:
+        manifest = await asyncio.get_event_loop().run_in_executor(None, bk.verify_backup, known[req.name])
+    except Exception as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)[:400]})
+    return JSONResponse({"ok": True, "files": len(manifest.get("files", {}) if isinstance(manifest, dict) else [])})
+
+@app.post("/api/system/events/{event_id}/retry")
+def api_system_event_retry(event_id: str) -> JSONResponse:
+    from agent.integrations import event_queue as eq
+    if not eq.retry_dead(event_id):
+        raise HTTPException(404, "Not a dead event")
+    return JSONResponse({"requeued": True})
+
+
 # ── SPA catch-all (must be last — only when dist/ is present) ─────────────────
 if _DIST.exists():
     @app.get("/{full_path:path}")

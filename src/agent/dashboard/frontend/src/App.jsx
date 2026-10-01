@@ -15,6 +15,7 @@ import Inbox from './ui/Inbox'
 import Login from './ui/Login'
 import LogViewer from './ui/LogViewer'
 import Settings from './ui/Settings'
+import System from './ui/System'
 import Overview, { QUICK } from './ui/Overview'
 import Palette from './ui/Palette'
 import RunDrawer from './ui/RunDrawer'
@@ -29,7 +30,8 @@ const TITLES = {
   approvals: ['Approvals', 'Fixes waiting for a human — the same queue as Slack'],
   incidents: ['Incidents & SLOs', 'Open incidents and error budgets'],
   commands: ['Command Runner', 'Every agent CLI command, with its options'],
-  settings: ['Settings', 'Connect your tools, protect the dashboard, read AtlasOS logs'],
+  system: ['System', "AtlasOS's own services, event queue, backups and logs"],
+  settings: ['Settings', 'Connect your tools and protect the dashboard'],
   about: ['About AtlasOS', 'Skills, and everything the assistant can run'],
 }
 
@@ -100,7 +102,7 @@ function IncidentsPanel({ refreshKey, onAsk }) {
   const incidents = useData('incidents', '/api/incidents', 30000)
   const slos = useData('slos', '/api/slos', 60000)
   useRefresh(incidents, refreshKey); useRefresh(slos, refreshKey)
-  return <Incidents incidents={incidents} slos={slos} onAsk={onAsk} />
+  return <Incidents incidents={incidents} slos={slos} onAsk={onAsk} onChanged={() => { incidents.reload(); slos.reload() }} />
 }
 function AboutPanel({ refreshKey, about, chatInfo }) {
   useRefresh(about, refreshKey)
@@ -330,7 +332,8 @@ function Shell() {
           {panel === 'jenkins' && <JenkinsPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
           {panel === 'github' && <GitHubPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
           {panel === 'aws' && <AwsPanel refreshKey={refreshKey} onAsk={ask} />}
-          {panel === 'settings' && <Settings key={refreshKey} live={live} context={context} onNav={setPanel} onLogs={setLogSource} />}
+          {panel === 'settings' && <Settings key={refreshKey} live={live} context={context} onNav={setPanel} />}
+          {panel === 'system' && <System key={refreshKey} onLogs={setLogSource} onDaemon={() => runQuick({ id: 'daemon' })} />}
           {panel === 'approvals' && <Approvals approvals={approvals} deploys={deploys} onChanged={() => { approvals.reload(); deploys.reload() }} />}
           {panel === 'incidents' && <IncidentsPanel refreshKey={refreshKey} onAsk={ask} />}
           {panel === 'commands' && <Commands key={cmdSel || 'none'} commands={commands} context={context} initial={cmdSel} />}

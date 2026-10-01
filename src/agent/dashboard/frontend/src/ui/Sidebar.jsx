@@ -9,6 +9,7 @@ export const NAV = [
   { id: 'approvals', label: 'Approvals', icon: 'ph-seal-check' },
   { id: 'incidents', label: 'Incidents & SLOs', icon: 'ph-siren' },
   { id: 'commands', label: 'Command Runner', icon: 'ph-terminal-window' },
+  { id: 'system', label: 'System', icon: 'ph-cpu' },
   { id: 'settings', label: 'Settings', icon: 'ph-gear' },
   { id: 'about', label: 'About', icon: 'ph-info' },
 ]
