@@ -52,8 +52,31 @@ def redact(text: str) -> str:
     return text
 
 
+_KC_TTL_S = 3.0
+_kc_cache: dict = {"at": 0.0, "value": ""}
+
+
+def _keychain_token() -> str:
+    """DASHBOARD_TOKEN as stored in the OS keychain right now, cached for a
+    few seconds. Read live so `agent secrets set DASHBOARD_TOKEN --generate`
+    takes effect without restarting the dashboard (found live: a token made
+    after the server started was rejected until a restart)."""
+    import time
+    now = time.monotonic()
+    if now - _kc_cache["at"] > _KC_TTL_S:
+        try:
+            from agent.core import secrets as sec
+            _kc_cache["value"] = (sec.get("DASHBOARD_TOKEN") or "").strip()
+        except Exception:
+            _kc_cache["value"] = ""
+        _kc_cache["at"] = now
+    return _kc_cache["value"]
+
+
 def expected_token() -> str:
-    return os.environ.get("DASHBOARD_TOKEN", "").strip()
+    """The keychain is the source of truth (it's where the CLI and the
+    Settings page write); the environment covers machines without one."""
+    return _keychain_token() or os.environ.get("DASHBOARD_TOKEN", "").strip()
 
 
 def token_ok(presented: str) -> bool:

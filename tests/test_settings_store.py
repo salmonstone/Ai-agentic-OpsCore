@@ -193,6 +193,20 @@ def test_without_the_cookie_settings_are_locked_once_protected(server, kr):
     assert stranger.post("/api/settings", json={"values": {"JENKINS_URL": "http://evil"}}).status_code == 401
 
 
+def test_token_set_from_the_cli_works_without_a_restart(server, kr):
+    """Found live: a token generated after the dashboard started was rejected
+    until a restart. The keychain is now read on each check."""
+    from agent.dashboard import security
+    security._kc_cache["at"] = 0.0
+    c = TestClient(server.app)
+    assert c.get("/api/approvals").status_code == 200          # no login yet
+    sec.store("DASHBOARD_TOKEN", "made-in-the-terminal")       # what `agent secrets set` does
+    security._kc_cache["at"] = 0.0                             # (the real cache expires in 3s)
+    assert c.get("/api/approvals").status_code == 401
+    assert c.post("/api/login", json={"token": "made-in-the-terminal"}).status_code == 200
+    assert c.get("/api/approvals").status_code == 200
+
+
 def test_get_settings_has_no_secret_values(client, kr):
     sec.store("ANTHROPIC_API_KEY", "sk-ant-should-never-appear")
     r = client.get("/api/settings")

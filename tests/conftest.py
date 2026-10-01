@@ -13,3 +13,17 @@ import pytest
 def _no_real_dashboard_token(monkeypatch):
     monkeypatch.setenv("DASHBOARD_TOKEN", "")      # record the original so it's restored after
     monkeypatch.delenv("DASHBOARD_TOKEN")
+    # The dashboard also reads the token live from the keychain; tests must
+    # never see the developer's real one. Tests that fake a keychain patch
+    # agent.core.secrets._keyring and still get it.
+    from agent.dashboard import security
+    monkeypatch.setattr(security, "_keychain_token", lambda: _fake_keychain_token())
+
+
+def _fake_keychain_token() -> str:
+    """Only a test's in-memory FakeKeyring counts; the real keychain is ignored."""
+    from agent.core import secrets as sec
+    kr = sec._keyring()
+    if type(kr).__name__ != "FakeKeyring":
+        return ""
+    return (kr.get_password(sec.SERVICE, "DASHBOARD_TOKEN") or "").strip()

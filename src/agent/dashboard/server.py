@@ -1150,6 +1150,8 @@ def api_settings_protect(request: Request) -> JSONResponse:
     except sec.SecretsError as exc:
         return JSONResponse({"detail": f"Couldn't store the token: {exc}"}, status_code=500)
     os.environ["DASHBOARD_TOKEN"] = token
+    from agent.dashboard import security
+    security._kc_cache["at"] = 0.0          # re-read the keychain on the next request
     resp = JSONResponse({"protected": True, "token": token})
     resp.set_cookie(COOKIE, token, httponly=True, samesite="strict",
                     secure=request.url.scheme == "https", max_age=30 * 86400, path="/")
