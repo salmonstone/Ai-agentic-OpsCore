@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { streamSSE } from '../lib/api'
+import { ago, streamSSE } from '../lib/api'
 import { useDemo } from '../lib/demo'
 import { Icon } from './common'
 import Markdown from './Markdown'
@@ -165,14 +165,60 @@ function ConfirmCard({ m, onDecide }) {
   )
 }
 
-export default function ChatWidget({ open, setOpen, askRequest, context, info }) {
+const SEV_RANK = { critical: 0, high: 0, sev1: 0, warning: 1, medium: 1, sev2: 1, low: 2, info: 2 }
+
+/** Incident-aware quick view: the top open incident, from real data only —
+ *  "likely cause" is the incident's own recorded cause, never an invented
+ *  diagnosis. A real AI diagnosis is one click away, through the same chat. */
+function DiagnoseTab({ incidents, onDiagnose, onViewAll }) {
+  const open = (incidents?.data || []).filter(i => i.status === 'open')
+    .sort((a, b) => (SEV_RANK[(a.severity || '').toLowerCase()] ?? 2) - (SEV_RANK[(b.severity || '').toLowerCase()] ?? 2) || Date.parse(b.opened_at) - Date.parse(a.opened_at))
+  if (!incidents?.data) return <div className="muted" style={{ padding: 16, fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 6 }}><Icon name="ph-circle-notch" className="spin" />Loading incidents…</div>
+  if (open.length === 0) return (
+    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, textAlign: 'center', color: 'var(--st-ok)' }}>
+      <Icon name="ph-check-circle" size={26} /><div style={{ fontSize: 13, color: 'var(--color-text)' }}>No open incidents</div>
+      <div className="muted" style={{ fontSize: 12 }}>Ask the assistant anything in Chat, or check in again if something comes up.</div>
+    </div>
+  )
+  const i = open[0]
+  const crit = (i.severity || '').toLowerCase() in SEV_RANK && SEV_RANK[(i.severity || '').toLowerCase()] === 0
+  return (
+    <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 13, borderRadius: 'var(--radius-md)',
+        border: `1px solid color-mix(in srgb, ${crit ? 'var(--st-crit)' : 'var(--st-warn)'} 45%, transparent)`,
+        background: `color-mix(in srgb, ${crit ? 'var(--st-crit)' : 'var(--st-warn)'} 7%, transparent)` }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Icon name="ph-siren" style={{ color: crit ? 'var(--st-crit)' : 'var(--st-warn)' }} />
+          <span className="kicker" style={{ fontSize: 10.5, color: crit ? 'var(--st-crit)' : 'var(--st-warn)' }}>Incident detected{open.length > 1 ? ` · ${open.length} open` : ''}</span>
+        </div>
+        <div style={{ fontSize: 14, fontWeight: 500, lineHeight: 1.3 }}>{i.title}</div>
+        <div className="mono muted" style={{ fontSize: 11 }}>{[i.service, i.namespace].filter(Boolean).join('/')} · opened {ago(i.opened_at)}</div>
+        {i.cause && (
+          <div>
+            <div className="kicker" style={{ fontSize: 10 }}>Likely cause</div>
+            <div style={{ fontSize: 12.5 }}>{i.cause}</div>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn btn-primary" onClick={() => onDiagnose(i)} style={{ fontSize: 12.5 }}><Icon name="ph-sparkle" />Diagnose with AI</button>
+          <button className="btn btn-secondary" onClick={onViewAll} style={{ fontSize: 12.5 }}><Icon name="ph-list-bullets" />View evidence</button>
+        </div>
+      </div>
+      {open.length > 1 && <div className="muted" style={{ fontSize: 11.5 }}>+{open.length - 1} more open — see Incidents &amp; SLOs.</div>}
+    </div>
+  )
+}
+
+export default function ChatWidget({ open, setOpen, askRequest, context, info, incidents, onNav, variant = 'overlay' }) {
   const { messages, setMessages, onEvent, push, startTurn, endTurn, patch, followUps, setFollowUps } = useThread()
   const demo = useDemo()
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [tab, setTab] = useState('chat')
   const sid = useRef(sessionId())
   const threadRef = useRef(null)
   const lastAsk = useRef(null)
+  const panel = variant === 'panel'
 
   useEffect(() => { if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight }, [messages, open])
 
@@ -217,6 +263,10 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
     const lastUser = [...messages].reverse().find(x => x.kind === 'user')
     if (lastUser) send(lastUser.text)
   }
+  const diagnose = i => {
+    setTab('chat')
+    send(`Summarize incident ${i.id} ("${i.title}") and what's likely causing it, then recommend a fix.`)
+  }
 
   const hasPendingConfirm = messages.some(m => m.kind === 'confirm' && m.status === 'pending')
 
@@ -234,15 +284,22 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
   }
 
   const mode = info?.data ? (info.data.mutations_enabled ? 'asks before changes' : 'read-only') : 'loading tools…'
+  const openCount = (incidents?.data || []).filter(i => i.status === 'open').length
   return (
-    <section aria-label="AtlasOS Assistant" style={{
+    <section aria-label="AtlasOS Assistant" style={panel ? {
+      position: 'sticky', top: 'var(--topbar-h)', height: 'calc(100vh - var(--topbar-h))', display: 'flex', flexDirection: 'column',
+      background: 'var(--color-bg-2)', boxShadow: 'inset 1px 0 0 var(--color-divider)', overflow: 'hidden',
+    } : {
       position: 'fixed', right: 20, bottom: 20, zIndex: 40, width: 400, maxWidth: 'calc(100vw - 40px)', height: 'min(620px, calc(100vh - 40px))',
       display: 'flex', flexDirection: 'column', borderRadius: 'var(--radius-lg)', background: 'var(--color-surface)', boxShadow: 'var(--shadow-lg)', overflow: 'hidden',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 10px 12px 14px', background: 'var(--rule) no-repeat bottom / 100% 1px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 10px 10px 14px', background: 'var(--rule) no-repeat bottom / 100% 1px' }}>
         <Icon name="ph-sparkle" size={18} style={{ color: 'var(--color-accent)' }} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 500 }}>AtlasOS Assistant</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 14, fontWeight: 500 }}>AtlasOS Assistant</span>
+            {!demo && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5, color: 'var(--st-ok)' }}><span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--st-ok)' }} />Online</span>}
+          </div>
           <div className="muted" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {demo
               ? <span style={{ color: 'var(--st-warn)' }}>Uses your live systems, not the demo data</span>
@@ -250,10 +307,29 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
           </div>
         </div>
         <button className="btn btn-ghost btn-icon" onClick={clear} aria-label="Clear chat" title="Clear chat" disabled={busy}><Icon name="ph-trash" size={16} /></button>
-        <button className="btn btn-ghost btn-icon" onClick={() => setOpen(false)} aria-label="Minimize" title="Minimize"><Icon name="ph-minus" size={16} /></button>
+        <button className="btn btn-ghost btn-icon" onClick={() => setOpen(false)} aria-label={panel ? 'Collapse' : 'Minimize'} title={panel ? 'Collapse' : 'Minimize'}><Icon name={panel ? 'ph-sidebar-simple' : 'ph-minus'} size={16} /></button>
       </div>
 
-      <div ref={threadRef} style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 10, padding: 14 }}>
+      {panel && (
+        <div role="tablist" style={{ display: 'flex', gap: 4, padding: '8px 10px 0' }}>
+          {[['chat', 'Chat', null], ['diagnose', 'Diagnose', openCount || null]].map(([id, label, badge]) => (
+            <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)} style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', border: 0, borderRadius: 'var(--radius-md) var(--radius-md) 0 0', cursor: 'pointer', fontSize: 12.5,
+              background: tab === id ? 'var(--color-surface)' : 'transparent', color: tab === id ? 'var(--color-text)' : 'var(--muted)',
+            }}>
+              {label}{badge ? <span className="mono" style={{ fontSize: 10, padding: '0 5px', borderRadius: 8, color: 'var(--st-crit)', background: 'color-mix(in srgb, var(--st-crit) 16%, transparent)' }}>{badge}</span> : null}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {panel && tab === 'diagnose' ? (
+        <div style={{ flex: 1, overflow: 'auto', background: 'var(--color-surface)' }}>
+          <DiagnoseTab incidents={incidents} onDiagnose={diagnose} onViewAll={() => onNav?.('incidents')} />
+        </div>
+      ) : (
+      <>
+      <div ref={threadRef} style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 10, padding: 14, background: panel ? 'var(--color-surface)' : undefined }}>
         {messages.length === 0 && (
           <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 15, fontWeight: 500 }}>Ask about your cluster, builds or spend.</div>
@@ -316,10 +392,12 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
         )}
       </div>
 
-      <form onSubmit={e => { e.preventDefault(); send(input) }} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '10px 12px 12px', background: 'var(--rule) no-repeat top / 100% 1px' }}>
-        <input id="chat-input" className="input" value={input} onChange={e => setInput(e.target.value)} placeholder={hasPendingConfirm ? 'Confirm or cancel above, or ask something else…' : 'Ask AtlasOS…'} aria-label="Message" style={{ flex: 1, minHeight: 38 }} />
+      <form onSubmit={e => { e.preventDefault(); send(input) }} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '10px 12px 12px', background: panel ? 'var(--color-surface)' : 'var(--rule) no-repeat top / 100% 1px', boxShadow: panel ? 'inset 0 1px 0 var(--color-divider)' : undefined }}>
+        <input id="chat-input" className="input" value={input} onChange={e => setInput(e.target.value)} placeholder={hasPendingConfirm ? 'Confirm or cancel above, or ask something else…' : 'Ask anything about your infrastructure…'} aria-label="Message" style={{ flex: 1, minHeight: 38 }} />
         <button type="submit" className="btn btn-primary" aria-label="Send" disabled={busy || !input.trim()} style={{ width: 38, height: 38, padding: 0 }}><Icon name="ph-paper-plane-right" size={16} /></button>
       </form>
+      </>
+      )}
     </section>
   )
 }

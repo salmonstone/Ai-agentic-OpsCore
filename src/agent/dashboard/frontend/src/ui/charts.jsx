@@ -96,6 +96,24 @@ export function SpendChart({ daily, mean, anomalies = [] }) {
   )
 }
 
+/** Ring gauge — one percentage, e.g. overall health computed from real
+ *  status sections (never a fabricated metric we don't have). */
+export function RingGauge({ pct, size = 92, stroke = 9, color }) {
+  const r = (size - stroke) / 2
+  const c = 2 * Math.PI * r
+  const clamped = pct == null ? 0 : Math.max(0, Math.min(100, pct))
+  const dash = (clamped / 100) * c
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={pct == null ? 'Unknown' : `${Math.round(clamped)}% healthy`}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--color-divider)" strokeWidth={stroke} />
+      {pct != null && (
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round"
+          strokeDasharray={`${dash} ${c - dash}`} transform={`rotate(-90 ${size / 2} ${size / 2})`} style={{ transition: 'stroke-dasharray .5s ease' }} />
+      )}
+    </svg>
+  )
+}
+
 /** Tiny trend line for tiles. */
 export function Sparkline({ data, color = 'var(--color-accent)', w = 90, h = 24 }) {
   if (!data?.length) return null

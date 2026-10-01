@@ -27,6 +27,8 @@ import Palette from './ui/Palette'
 import RunDrawer from './ui/RunDrawer'
 import Sidebar, { NAV } from './ui/Sidebar'
 
+const TOPBAR_H = 56
+
 const TITLES = {
   overview: ['Overview', 'Everything AtlasOS watches, at a glance'],
   cluster: ['Cluster', 'Nodes, problem pods, and what the daemon healed'],
@@ -115,6 +117,16 @@ function IncidentsPanel({ refreshKey, onAsk }) {
   useRefresh(incidents, refreshKey); useRefresh(slos, refreshKey)
   return <Incidents incidents={incidents} slos={slos} onAsk={onAsk} onChanged={() => { incidents.reload(); slos.reload() }} />
 }
+function OverviewPanel({ refreshKey, summary, actions, chart, spend, live, incidents, approvals, deploys, onNav, onRun, onAsk, onOpenChat, daemonRunning, demo }) {
+  const clusterMini = useData('cluster', '/api/cluster', 30000, demo)
+  const notifications = useData('notifications', '/api/notifications?limit=12', 20000, demo)
+  useRefresh(clusterMini, refreshKey); useRefresh(notifications, refreshKey)
+  return (
+    <Overview summary={summary} actions={actions} chart={chart} spend={spend} live={live} incidents={incidents}
+      approvals={approvals} deploys={deploys} cluster={clusterMini} notifications={notifications}
+      onNav={onNav} onRun={onRun} onAsk={onAsk} onOpenChat={onOpenChat} daemonRunning={daemonRunning} />
+  )
+}
 function AboutPanel({ refreshKey, about, chatInfo }) {
   useRefresh(about, refreshKey)
   return <About about={about} chatInfo={chatInfo} />
@@ -174,6 +186,55 @@ function DemoSwitch({ demo, onToggle }) {
   )
 }
 
+/** Full-width bar above the sidebar/main/chat grid: brand, global search
+ *  (opens the Ctrl+K palette — same live /api/search it always used), the
+ *  cluster context, notifications, and a settings shortcut in place of a
+ *  fabricated user identity (the dashboard has one shared login, not
+ *  per-user accounts). */
+function TopBar({ mobile, onOpenNav, onOpenPalette, version, panel, clusters, demo, onClustersChanged, onNav }) {
+  return (
+    <header style={{
+      position: 'sticky', top: 0, zIndex: 50, height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', gap: 14,
+      padding: '0 16px', background: 'var(--color-bg-2)', boxShadow: '0 1px 0 var(--color-divider)',
+    }}>
+      {mobile && (
+        <button className="btn btn-secondary btn-icon" onClick={onOpenNav} aria-label="Open menu"><Icon name="ph-list" size={18} /></button>
+      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, flex: mobile ? '0 0 auto' : '0 0 190px' }}>
+        <div style={{
+          width: 30, height: 30, borderRadius: 9, border: '1px solid var(--color-accent)', display: 'grid', placeItems: 'center',
+          color: 'var(--color-accent)', boxShadow: '0 0 14px color-mix(in srgb, var(--color-accent) 30%, transparent)', flex: 'none',
+        }}><Icon name="ph-globe-simple" size={16} /></div>
+        {!mobile && (
+          <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.15, minWidth: 0 }}>
+            <span style={{ fontSize: 14.5, fontWeight: 500, letterSpacing: '-0.01em' }}>AtlasOS</span>
+            <span className="mono muted" style={{ fontSize: 10 }}>{version ? `v${version} · local` : 'local'}</span>
+          </div>
+        )}
+      </div>
+
+      <button onClick={onOpenPalette} style={{
+        flex: '1 1 auto', display: 'flex', alignItems: 'center', gap: 9, minHeight: 36, maxWidth: 640, margin: '0 auto', padding: '0 12px',
+        borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'var(--color-surface)', cursor: 'pointer',
+        color: 'var(--muted)', fontSize: 13, textAlign: 'left',
+      }}>
+        <Icon name="ph-magnifying-glass" size={15} />
+        {!mobile && <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Search incidents, pods, builds, AWS, domains…</span>}
+        {!mobile && <kbd className="mono" style={{ fontSize: 10.5, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--color-divider)', flex: 'none' }}>Ctrl K</kbd>}
+      </button>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '0 0 auto' }}>
+        {!mobile && <ContextSwitcher clusters={clusters} demo={demo} onSwitched={onClustersChanged} />}
+        <Inbox onNav={onNav} demo={demo} />
+        <button className="btn btn-ghost btn-icon" onClick={() => onNav('settings')} aria-label="Settings" title="Settings"
+          style={{ width: 32, height: 32, borderRadius: '50%', border: '1px solid var(--color-divider)', color: 'var(--muted)' }}>
+          <Icon name="ph-user-circle" size={19} />
+        </button>
+      </div>
+    </header>
+  )
+}
+
 function Shell() {
   const [panel, setPanel] = useState(() => {
     const h = location.hash.slice(1)
@@ -181,7 +242,7 @@ function Shell() {
   })
   const [demo, setDemo] = useState(() => load('atlas-demo', '0') === '1')
   const [theme, setTheme] = useState(() => load('atlas-theme', 'dark'))
-  const [chatOpen, setChatOpen] = useState(false)
+  const [chatOpen, setChatOpen] = useState(() => load('atlas-chat-open', '1') === '1')
   const [askRequest, setAskRequest] = useState(null)
   const [run, setRun] = useState(null)
   const [refreshKey, setRefreshKey] = useState(0)
@@ -193,7 +254,7 @@ function Shell() {
   const lastQuick = useRef(null)
   const width = useWidth()
   const mobile = width < 900
-  const wide = width >= 1180
+  const dock = width >= 1340 && !mobile   // wide enough to dock the assistant as a third column
 
   const live = useLive(demo)
   // Shell renders the DemoCtx provider, so its own hooks get `demo` passed in.
@@ -204,12 +265,14 @@ function Shell() {
   const clusters = useData('clusters', '/api/clusters', 0, demo)
   const chart = useData('chart', '/api/chart', 300000, demo)
   const spend = useData('spend', '/api/spend', 3600000, demo)
+  const incidents = useData('incidents', '/api/incidents', 30000, demo)
   const commands = usePoll('/api/commands')
   const chatInfo = usePoll('/api/chat/info')
   const about = usePoll('/api/about')
 
   useEffect(() => { document.documentElement.dataset.theme = theme; save('atlas-theme', theme) }, [theme])
   useEffect(() => { save('atlas-demo', demo ? '1' : '0') }, [demo])
+  useEffect(() => { save('atlas-chat-open', chatOpen ? '1' : '0') }, [chatOpen])
   useEffect(() => { history.replaceState(null, '', `#${panel}`); setNavOpen(false) }, [panel])
   useEffect(() => {
     const onKey = e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPaletteOpen(o => !o) } }
@@ -225,6 +288,7 @@ function Shell() {
     if (demo) return
     if (panel === 'overview') { summary.reload('/api/summary?force=true'); actions.reload(); chart.reload(); spend.reload() }
     if (panel === 'approvals') { approvals.reload(); deploys.reload() }
+    if (panel === 'overview') { incidents.reload(); approvals.reload(); deploys.reload() }
     clusters.reload()
   }
 
@@ -282,38 +346,41 @@ function Shell() {
 
   const sidebar = (
     <Sidebar panel={panel} onNav={setPanel} badges={badges} live={live} context={context}
-      theme={theme} onToggleTheme={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))} version={about.data?.version}
-      onSearch={() => setPaletteOpen(true)} />
+      theme={theme} onToggleTheme={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))} />
   )
+  const showChatPanel = dock && chatOpen
 
   return (
     <DemoCtx.Provider value={demo}>
-      <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'minmax(0, 1fr)' : '216px minmax(0, 1fr)', minHeight: '100vh' }}>
-        {!mobile && sidebar}
-        {mobile && navOpen && (
-          <>
-            <div onClick={() => setNavOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 44, background: 'color-mix(in srgb, var(--color-bg) 60%, transparent)' }} />
-            <div style={{ position: 'fixed', top: 0, left: 0, bottom: 0, width: 240, zIndex: 45, boxShadow: 'var(--shadow-lg)' }}>{sidebar}</div>
-          </>
-        )}
+      <div style={{ '--topbar-h': `${TOPBAR_H}px`, minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+        <TopBar mobile={mobile} onOpenNav={() => setNavOpen(true)} onOpenPalette={() => setPaletteOpen(true)}
+          version={about.data?.version} panel={panel} clusters={clusters} demo={demo} onNav={setPanel}
+          onClustersChanged={() => { clusters.reload(); setRefreshKey(k => k + 1) }} />
 
-        <main style={{ minWidth: 0, padding: mobile ? '12px 16px 96px' : `18px ${chatOpen && wide ? 440 : 28}px 96px 28px`, display: 'flex', flexDirection: 'column', gap: 18, transition: 'padding .2s' }}>
-          <header style={{ display: 'flex', alignItems: 'flex-end', gap: '12px 12px', flexWrap: 'wrap' }}>
-            {mobile && (
-              <button className="btn btn-secondary btn-icon" onClick={() => setNavOpen(true)} aria-label="Open menu" style={{ alignSelf: 'center' }}><Icon name="ph-list" size={18} /></button>
-            )}
-            <div style={{ minWidth: 0, flex: '1 1 220px' }}>
-              <h1 style={{ fontSize: 22, marginBottom: 3 }}>{title}</h1>
-              <div className="muted" style={{ fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{panel === 'cluster' ? context || sub : sub}</div>
-            </div>
-            {panel === 'cluster' && <ContextSwitcher clusters={clusters} demo={demo} onSwitched={() => { clusters.reload(); setRefreshKey(k => k + 1) }} />}
-            <Inbox onNav={setPanel} demo={demo} />
-            <button className="btn btn-secondary" onClick={() => setPaletteOpen(true)} style={{ padding: '5px 10px', fontSize: 12.5, color: 'var(--muted)' }} title="Command palette">
-              <Icon name="ph-magnifying-glass" />{mobile ? '' : 'Search'}<kbd className="mono" style={{ fontSize: 10.5, padding: '0 5px', borderRadius: 4, border: '1px solid var(--color-divider)' }}>Ctrl K</kbd>
-            </button>
-            <DemoSwitch demo={demo} onToggle={() => setDemo(d => !d)} />
-            <button className="btn btn-secondary" onClick={refresh} style={{ padding: '5px 10px', fontSize: 12.5 }}><Icon name="ph-arrow-clockwise" />{mobile ? '' : 'Refresh'}</button>
-          </header>
+        <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'minmax(0, 1fr)' : showChatPanel ? '216px minmax(0, 1fr) 388px' : '216px minmax(0, 1fr)', flex: 1, minHeight: 0 }}>
+          {!mobile && sidebar}
+          {mobile && navOpen && (
+            <>
+              <div onClick={() => setNavOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 54, background: 'color-mix(in srgb, var(--color-bg) 60%, transparent)' }} />
+              <div style={{ position: 'fixed', top: 0, left: 0, bottom: 0, width: 240, zIndex: 55, boxShadow: 'var(--shadow-lg)' }}>{sidebar}</div>
+            </>
+          )}
+
+          <main style={{ minWidth: 0, padding: mobile ? '12px 16px 96px' : '18px 28px 96px', display: 'flex', flexDirection: 'column', gap: 18 }}>
+            <header style={{ display: 'flex', alignItems: 'flex-end', gap: '12px 12px', flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0, flex: '1 1 220px' }}>
+                <h1 style={{ fontSize: 22, marginBottom: 3 }}>{title}</h1>
+                <div className="muted" style={{ fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{panel === 'cluster' ? context || sub : sub}</div>
+              </div>
+              {panel === 'cluster' && <ContextSwitcher clusters={clusters} demo={demo} onSwitched={() => { clusters.reload(); setRefreshKey(k => k + 1) }} />}
+              <DemoSwitch demo={demo} onToggle={() => setDemo(d => !d)} />
+              <button className="btn btn-secondary" onClick={refresh} style={{ padding: '5px 10px', fontSize: 12.5 }}><Icon name="ph-arrow-clockwise" />{mobile ? '' : 'Refresh'}</button>
+              {dock && !chatOpen && (
+                <button className="btn btn-primary" onClick={() => setChatOpen(true)} style={{ padding: '5px 10px', fontSize: 12.5 }}>
+                  <Icon name="ph-sparkle" />Assistant
+                </button>
+              )}
+            </header>
 
           {demo && (
             <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', borderRadius: 'var(--radius-md)', border: '1px solid color-mix(in srgb, var(--st-warn) 45%, transparent)', background: 'color-mix(in srgb, var(--st-warn) 10%, transparent)', fontSize: 12.5 }}>
@@ -339,7 +406,11 @@ function Shell() {
           )}
 
           {panel === 'overview' && <SetupChecklist live={live} context={context} onNav={setPanel} />}
-          {panel === 'overview' && <Overview summary={summary} actions={actions} chart={chart} spend={spend} live={live} onNav={setPanel} onRun={runQuick} daemonRunning={!!live?.stats?.daemon_running} />}
+          {panel === 'overview' && (
+            <OverviewPanel refreshKey={refreshKey} summary={summary} actions={actions} chart={chart} spend={spend} live={live}
+              incidents={incidents} approvals={approvals} deploys={deploys} onNav={setPanel} onRun={runQuick} onAsk={ask}
+              onOpenChat={() => setChatOpen(true)} daemonRunning={!!live?.stats?.daemon_running} demo={demo} />
+          )}
           {panel === 'cluster' && <ClusterPanel refreshKey={refreshKey} onAsk={ask} onConnected={() => clusters.reload()} onLogs={setLogSource} />}
           {panel === 'jenkins' && <JenkinsPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
           {panel === 'github' && <GitHubPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
@@ -355,11 +426,20 @@ function Shell() {
           {panel === 'incidents' && <IncidentsPanel refreshKey={refreshKey} onAsk={ask} />}
           {panel === 'commands' && <Commands key={cmdSel || 'none'} commands={commands} context={context} initial={cmdSel} />}
           {panel === 'about' && <AboutPanel refreshKey={refreshKey} about={about} chatInfo={chatInfo} />}
-        </main>
+          </main>
+
+          {showChatPanel && (
+            <ChatWidget variant="panel" open setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
+              incidents={incidents} onNav={setPanel} />
+          )}
+        </div>
 
         <LogViewer source={logSource} onClose={() => setLogSource(null)} onAsk={ask} />
         <RunDrawer run={run}onClose={() => setRun(null)} onRerun={lastQuick.current ? () => runQuick(lastQuick.current) : null} onAsk={askAboutRun} />
-        <ChatWidget open={chatOpen} setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo} />
+        {!showChatPanel && (
+          <ChatWidget variant="overlay" open={chatOpen} setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
+            incidents={incidents} onNav={setPanel} />
+        )}
         <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} nav={NAV} quick={quickItems} commands={allCommands}
           onNav={setPanel} onRun={runQuick} onPickCommand={c => { setCmdSel(c); setPanel('commands') }} onAsk={ask} toggles={toggles} />
         {toast && (

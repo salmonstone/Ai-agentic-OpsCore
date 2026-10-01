@@ -1,72 +1,107 @@
+import { useState } from 'react'
 import { Icon } from './common'
 
-export const NAV = [
+// A tree for the sidebar's collapsible groups. Flattened to NAV below for
+// everything else (Palette's "Go to", page titles, nav badges) — same ids,
+// same order they were in before, just visually grouped here.
+export const NAV_TREE = [
   { id: 'overview', label: 'Overview', icon: 'ph-squares-four' },
-  { id: 'cluster', label: 'Cluster', icon: 'ph-cube' },
-  { id: 'jenkins', label: 'Jenkins', icon: 'ph-hammer' },
-  { id: 'github', label: 'GitHub Actions', icon: 'ph-github-logo' },
-  { id: 'aws', label: 'AWS', icon: 'ph-cloud' },
-  { id: 'databases', label: 'Databases', icon: 'ph-database' },
-  { id: 'domains', label: 'Domains & HTTPS', icon: 'ph-globe-hemisphere-west' },
-  { id: 'deploys', label: 'Deploys', icon: 'ph-rocket-launch' },
-  { id: 'approvals', label: 'Approvals', icon: 'ph-seal-check' },
+  { group: 'Infrastructure', icon: 'ph-cube', items: [
+    { id: 'cluster', label: 'Cluster', icon: 'ph-cube' },
+    { id: 'databases', label: 'Databases', icon: 'ph-database' },
+  ] },
+  { group: 'CI/CD', icon: 'ph-git-branch', items: [
+    { id: 'jenkins', label: 'Jenkins', icon: 'ph-hammer' },
+    { id: 'github', label: 'GitHub Actions', icon: 'ph-github-logo' },
+    { id: 'deploys', label: 'Deploys', icon: 'ph-rocket-launch' },
+  ] },
+  { group: 'Cloud', icon: 'ph-cloud', items: [
+    { id: 'aws', label: 'AWS', icon: 'ph-cloud' },
+    { id: 'domains', label: 'Domains & HTTPS', icon: 'ph-globe-hemisphere-west' },
+  ] },
+  { group: 'Operations', icon: 'ph-gear-six', items: [
+    { id: 'automation', label: 'Automation', icon: 'ph-robot' },
+    { id: 'commands', label: 'Command Runner', icon: 'ph-terminal-window' },
+    { id: 'system', label: 'System', icon: 'ph-cpu' },
+  ] },
   { id: 'incidents', label: 'Incidents & SLOs', icon: 'ph-siren' },
-  { id: 'automation', label: 'Automation', icon: 'ph-robot' },
-  { id: 'commands', label: 'Command Runner', icon: 'ph-terminal-window' },
+  { id: 'approvals', label: 'Approvals', icon: 'ph-seal-check' },
   { id: 'activity', label: 'Activity', icon: 'ph-clock-counter-clockwise' },
-  { id: 'system', label: 'System', icon: 'ph-cpu' },
   { id: 'settings', label: 'Settings', icon: 'ph-gear' },
   { id: 'about', label: 'About', icon: 'ph-info' },
 ]
+export const NAV = NAV_TREE.flatMap(n => (n.items ? n.items : [n]))
 
-export default function Sidebar({ panel, onNav, badges, live, context, theme, onToggleTheme, version }) {
+function loadCollapsed() {
+  try { return new Set(JSON.parse(localStorage.getItem('atlas-nav-collapsed') || '[]')) } catch { return new Set() }
+}
+function saveCollapsed(set) {
+  try { localStorage.setItem('atlas-nav-collapsed', JSON.stringify([...set])) } catch { /* private window */ }
+}
+
+function NavButton({ n, cur, badge, onNav, indent }) {
+  return (
+    <button className={cur ? '' : 'navbtn'} onClick={() => onNav(n.id)} aria-current={cur ? 'page' : undefined}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: indent ? '6px 10px 6px 26px' : '6px 10px', border: 0,
+        borderRadius: 'var(--radius-md)', cursor: 'pointer', textAlign: 'left', fontSize: 13,
+        background: cur ? 'color-mix(in srgb, var(--color-accent) 16%, transparent)' : 'transparent',
+        color: cur ? 'var(--color-text)' : 'color-mix(in srgb, var(--color-text) 80%, transparent)',
+      }}>
+      <Icon name={n.icon} size={16} style={{ color: cur ? 'var(--color-accent)' : 'var(--muted)' }} />
+      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.label}</span>
+      {badge ? (
+        <span className="mono" style={{
+          minWidth: 18, height: 18, padding: '0 5px', borderRadius: 9, display: 'inline-grid', placeItems: 'center', fontSize: 10.5,
+          color: badge.t === 'crit' ? 'var(--st-crit)' : 'var(--st-warn)',
+          background: `color-mix(in srgb, ${badge.t === 'crit' ? 'var(--st-crit)' : 'var(--st-warn)'} 14%, transparent)`,
+        }}>{badge.n}</span>
+      ) : null}
+    </button>
+  )
+}
+
+export default function Sidebar({ panel, onNav, badges, live, context, theme, onToggleTheme }) {
+  const [collapsed, setCollapsed] = useState(loadCollapsed)
+  const toggleGroup = label => setCollapsed(c => {
+    const next = new Set(c); next.has(label) ? next.delete(label) : next.add(label); saveCollapsed(next); return next
+  })
   const daemonOn = live?.stats?.daemon_running
   const offline = live?.offline
   const known = live != null
+
   return (
     <aside style={{
-      position: 'sticky', top: 0, height: '100vh', display: 'flex', flexDirection: 'column', gap: 14,
-      padding: '16px 12px', background: 'color-mix(in srgb, var(--color-surface) 40%, var(--color-bg))',
-      boxShadow: 'inset -1px 0 0 var(--color-divider)',
+      position: 'sticky', top: 'var(--topbar-h)', height: 'calc(100vh - var(--topbar-h))', display: 'flex', flexDirection: 'column',
+      padding: '10px 10px 12px', background: 'color-mix(in srgb, var(--color-surface) 35%, var(--color-bg))',
+      boxShadow: 'inset -1px 0 0 var(--color-divider)', overflowY: 'auto',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '2px 6px 8px' }}>
-        <div style={{
-          width: 28, height: 28, borderRadius: 8, border: '1px solid var(--color-accent)', display: 'grid', placeItems: 'center',
-          color: 'var(--color-accent)', boxShadow: '0 0 14px color-mix(in srgb, var(--color-accent) 30%, transparent)',
-        }}><Icon name="ph-globe-simple" size={16} /></div>
-        <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
-          <span style={{ fontSize: 15, fontWeight: 500, letterSpacing: '-0.01em' }}>AtlasOS</span>
-          <span className="mono muted" style={{ fontSize: 10.5 }}>{version ? `v${version} · local` : 'local'}</span>
-        </div>
-      </div>
-
-      <nav style={{ display: 'flex', flexDirection: 'column', gap: 1, overflowY: 'auto', minHeight: 0 }}>
-        {NAV.map(n => {
-          const cur = panel === n.id
-          const b = badges[n.id]
+      <nav style={{ display: 'flex', flexDirection: 'column', gap: 1, flex: 1 }}>
+        {NAV_TREE.map(n => {
+          if (!n.items) return <NavButton key={n.id} n={n} cur={panel === n.id} badge={badges[n.id]} onNav={onNav} />
+          const isCollapsed = collapsed.has(n.group)
+          const groupHasCurrent = n.items.some(i => i.id === panel)
           return (
-            <button key={n.id} className={cur ? '' : 'navbtn'} onClick={() => onNav(n.id)} aria-current={cur ? 'page' : undefined}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '6px 10px', border: 0,
-                borderRadius: 'var(--radius-md)', cursor: 'pointer', textAlign: 'left', fontSize: 13,
-                background: cur ? 'color-mix(in srgb, var(--color-accent) 16%, transparent)' : 'transparent',
-                color: cur ? 'var(--color-text)' : 'color-mix(in srgb, var(--color-text) 80%, transparent)',
+            <div key={n.group} style={{ marginTop: 10 }}>
+              <button onClick={() => toggleGroup(n.group)} aria-expanded={!isCollapsed} style={{
+                display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '4px 10px', border: 0, background: 'transparent',
+                cursor: 'pointer', textAlign: 'left', color: groupHasCurrent ? 'var(--color-text)' : 'var(--muted)',
               }}>
-              <Icon name={n.icon} size={16} style={{ color: cur ? 'var(--color-accent)' : 'var(--muted)' }} />
-              <span style={{ flex: 1 }}>{n.label}</span>
-              {b ? (
-                <span className="mono" style={{
-                  minWidth: 18, height: 18, padding: '0 5px', borderRadius: 9, display: 'inline-grid', placeItems: 'center', fontSize: 10.5,
-                  color: b.t === 'crit' ? 'var(--st-crit)' : 'var(--st-warn)',
-                  background: `color-mix(in srgb, ${b.t === 'crit' ? 'var(--st-crit)' : 'var(--st-warn)'} 14%, transparent)`,
-                }}>{b.n}</span>
-              ) : null}
-            </button>
+                <Icon name={n.icon} size={13} />
+                <span className="kicker" style={{ flex: 1, fontSize: 10.5, color: 'inherit' }}>{n.group}</span>
+                <Icon name={isCollapsed ? 'ph-caret-right' : 'ph-caret-down'} size={11} />
+              </button>
+              {!isCollapsed && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginTop: 2 }}>
+                  {n.items.map(i => <NavButton key={i.id} n={i} cur={panel === i.id} badge={badges[i.id]} onNav={onNav} indent />)}
+                </div>
+              )}
+            </div>
           )
         })}
       </nav>
 
-      <div className="surface" style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 10, padding: 10 }}>
+      <div className="surface" style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 9, padding: 10 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
           <Icon name={!known ? 'ph-question' : daemonOn ? 'ph-heartbeat' : 'ph-pause-circle'} size={15}
             style={{ marginTop: 1, color: !known ? 'var(--st-unk)' : daemonOn ? 'var(--st-ok)' : 'var(--st-warn)' }} />
