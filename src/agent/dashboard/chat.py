@@ -252,18 +252,23 @@ def _system_prompt() -> str:
         "When the user wants a change, call the tool; the Confirm card is the question, so don't ask "
         "'shall I?' first. Never pass confirm arguments. Never say something was applied until a tool "
         "result says so.\n"
-        "- Plain text only: no markdown headers, tables or bold. Short lines and simple lists are fine. "
-        "Use exact names (pods, namespaces, jobs, build numbers). Be concise.\n\n"
+        "- Formatting: short paragraphs, '- ' bullet lists, numbered lists, `inline code` for names "
+        "and commands, **bold** sparingly, ``` fenced blocks for multi-line commands. No headers, no "
+        "tables. Use exact names (pods, namespaces, jobs, build numbers). Be concise.\n\n"
         f"Current kube context: {ctx}. Today: {datetime.now(timezone.utc):%Y-%m-%d} (UTC)."
     )
 
 
-def _log_usage(model: str, final, t0: float) -> None:
+def _log_usage(model: str, final, t0: float, total: dict) -> None:
+    """Log to the shared cost tracker, and add to this turn's running total
+    (shown under the answer in the UI)."""
     try:
-        from agent.observability.costs import log_usage
-        log_usage(model=model, input_tokens=final.usage.input_tokens,
-                  output_tokens=final.usage.output_tokens,
-                  latency_ms=(time.perf_counter() - t0) * 1000)
+        from agent.observability.costs import calculate_cost, log_usage
+        i, o = final.usage.input_tokens, final.usage.output_tokens
+        log_usage(model=model, input_tokens=i, output_tokens=o, latency_ms=(time.perf_counter() - t0) * 1000)
+        total["input_tokens"] += i
+        total["output_tokens"] += o
+        total["cost_usd"] += calculate_cost(model, i, o)
     except Exception:
         pass
 
@@ -284,6 +289,7 @@ async def _loop(s: _Session) -> AsyncIterator[dict]:
         yield {"type": "error", "message": "The assistant couldn't load AtlasOS tools.", "detail": str(exc)[:300]}
         return
     mutating = _mutating()
+    usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
 
     for _ in range(MAX_STEPS):
         t0 = time.perf_counter()
@@ -299,7 +305,7 @@ async def _loop(s: _Session) -> AsyncIterator[dict]:
             log.warning("dashboard_chat.llm_failed", error=str(exc))
             yield {"type": "error", "message": "The assistant couldn't reach Claude.", "detail": str(exc)[:300]}
             return
-        _log_usage(settings.llm_model, final, t0)
+        _log_usage(settings.llm_model, final, t0, usage)
 
         content = []
         for b in final.content:
@@ -311,7 +317,7 @@ async def _loop(s: _Session) -> AsyncIterator[dict]:
 
         tool_uses = [c for c in content if c["type"] == "tool_use"]
         if final.stop_reason != "tool_use" or not tool_uses:
-            yield {"type": "done", "stop": "end_turn"}
+            yield {"type": "done", "stop": "end_turn", "usage": usage}
             return
 
         results: dict[str, dict] = {}
@@ -330,7 +336,7 @@ async def _loop(s: _Session) -> AsyncIterator[dict]:
             for tu in paused:
                 yield {"type": "confirm", "id": tu["id"], "name": tu["name"],
                        "title": _confirm_title(tu), "input": tu["input"]}
-            yield {"type": "done", "stop": "awaiting_confirm"}
+            yield {"type": "done", "stop": "awaiting_confirm", "usage": usage}
             return
 
         _append_user(s, [results[tu["id"]] for tu in tool_uses])

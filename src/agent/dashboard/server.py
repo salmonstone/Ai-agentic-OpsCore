@@ -26,22 +26,48 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from agent.dashboard.security import COOKIE, GuardMiddleware, expected_token, token_ok
 
 _DIST = Path(__file__).parent / "frontend" / "dist"
 
 app = FastAPI(title="AtlasOS Dashboard API", docs_url="/api/docs", redoc_url=None)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Replaces CORS allow_origins=["*"]: no cross-site state changes, optional
+# login via DASHBOARD_TOKEN. See dashboard/security.py.
+app.add_middleware(GuardMiddleware)
+
+
+class LoginRequest(BaseModel):
+    token: str
+
+@app.get("/api/auth/status")
+def api_auth_status(request: Request) -> JSONResponse:
+    required = bool(expected_token())
+    return JSONResponse({"required": required,
+                         "ok": (not required) or token_ok(request.cookies.get(COOKIE, ""))})
+
+@app.post("/api/login")
+async def api_login(req: LoginRequest, request: Request) -> JSONResponse:
+    if not expected_token():
+        return JSONResponse({"ok": True, "required": False})
+    if not token_ok(req.token.strip()):
+        await asyncio.sleep(0.8)          # slow down guessing
+        return JSONResponse({"ok": False, "detail": "Wrong token."}, status_code=401)
+    resp = JSONResponse({"ok": True, "required": True})
+    resp.set_cookie(COOKIE, req.token.strip(), httponly=True, samesite="strict",
+                    secure=request.url.scheme == "https", max_age=30 * 86400, path="/")
+    return resp
+
+@app.post("/api/logout")
+def api_logout() -> JSONResponse:
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE, path="/")
+    return resp
 
 # Serve pre-built React dist when available (production mode)
 if _DIST.exists():
@@ -867,6 +893,30 @@ async def api_summary(force: bool = False) -> JSONResponse:
         _summary_cache["data"] = await asyncio.get_event_loop().run_in_executor(None, _build)
         _summary_cache["at"] = _time.time()
     return JSONResponse(_summary_cache["data"])
+
+
+# ── AWS spend chart ───────────────────────────────────────────────────────────
+# Daily spend + the statistical spike days — the same numbers the daemon's
+# spend-anomaly alert uses. Cost Explorer is $0.01 a call, so cache an hour.
+_SPEND_TTL_S = 3600
+_spend_cache: dict = {"at": 0.0, "data": None}
+
+@app.get("/api/spend")
+async def api_spend(force: bool = False) -> JSONResponse:
+    import time as _time
+    if force or _spend_cache["data"] is None or _time.time() - _spend_cache["at"] > _SPEND_TTL_S:
+        def _build():
+            from agent.integrations.aws_cost import get_spend_anomalies
+            d = get_spend_anomalies(days=30)
+            return {"daily": d.get("daily_totals") or [], "mean": d.get("mean_daily") or 0.0,
+                    "anomalies": [a.get("date") for a in d.get("anomaly_days") or []],
+                    "generated_at": datetime.now(timezone.utc).isoformat()}
+        try:
+            _spend_cache["data"] = await asyncio.get_event_loop().run_in_executor(None, _build)
+            _spend_cache["at"] = _time.time()
+        except Exception as exc:
+            return JSONResponse({"daily": [], "error": str(exc)}, status_code=200)
+    return JSONResponse(_spend_cache["data"])
 
 
 # ── cluster panel ─────────────────────────────────────────────────────────────

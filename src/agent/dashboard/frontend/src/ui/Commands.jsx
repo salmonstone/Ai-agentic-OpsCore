@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { runCommand } from '../lib/api'
+import { useDemo } from '../lib/demo'
 import { lineColor } from '../lib/tone'
 import { Icon, NoData, SkeletonRows } from './common'
 
@@ -17,6 +18,7 @@ function Toggle({ on, onFlip }) {
 }
 
 export default function Commands({ commands, context, initial }) {
+  const demo = useDemo()
   const [q, setQ] = useState('')
   const [sel, setSel] = useState(initial || null)
   const [vals, setVals] = useState({})
@@ -146,10 +148,10 @@ export default function Commands({ commands, context, initial }) {
               </label>
             )}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              <button className={`btn ${cmd.is_destructive ? 'btn-danger' : 'btn-primary'}`} onClick={run} disabled={running || (cmd.is_destructive && !confirm)}>
+              <button className={`btn ${cmd.is_destructive ? 'btn-danger' : 'btn-primary'}`} onClick={run} disabled={demo || running || (cmd.is_destructive && !confirm)}>
                 <Icon name="ph-play" />Run {cmd.full_command}
               </button>
-              <span className="muted" style={{ fontSize: 12 }}>{running ? 'Running…' : cmd.is_destructive && !confirm ? 'Tick the box to enable Run.' : ''}</span>
+              <span className="muted" style={{ fontSize: 12 }}>{demo ? 'Running commands is disabled in demo mode.' : running ? 'Running…' : cmd.is_destructive && !confirm ? 'Tick the box to enable Run.' : ''}</span>
             </div>
           </div>
         )}

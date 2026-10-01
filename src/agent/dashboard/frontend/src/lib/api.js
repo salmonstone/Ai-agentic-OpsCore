@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+/** A 401 means the dashboard login (DASHBOARD_TOKEN) is on and we're not
+ *  logged in — App listens for this event and shows the login screen. */
+function checkAuth(r) {
+  if (r.status === 401) window.dispatchEvent(new Event('atlas-auth-required'))
+}
+
 export async function getJSON(url) {
   const r = await fetch(url)
+  checkAuth(r)
   const body = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(body.error || body.detail || `${r.status} ${r.statusText}`)
   return body
@@ -9,17 +16,20 @@ export async function getJSON(url) {
 
 export async function postJSON(url, data) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data ?? {}) })
+  checkAuth(r)
   const body = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(body.error || body.detail || `${r.status} ${r.statusText}`)
   return body
 }
 
 /** Fetch `url` on mount, every `intervalMs` (0 = never), and on reload().
- *  Keeps the last good data while refreshing; `error` is set on failure. */
+ *  Keeps the last good data while refreshing; `error` is set on failure.
+ *  url = null fetches nothing (demo mode supplies the data instead). */
 export function usePoll(url, intervalMs = 0) {
-  const [state, setState] = useState({ data: null, error: null, loading: true, at: null })
+  const [state, setState] = useState({ data: null, error: null, loading: !!url, at: null })
   const alive = useRef(true)
   const load = useCallback(async (u = url) => {
+    if (!u) return
     setState(s => ({ ...s, loading: true }))
     try {
       const data = await getJSON(u)
@@ -30,10 +40,11 @@ export function usePoll(url, intervalMs = 0) {
   }, [url])
   useEffect(() => {
     alive.current = true
+    if (!url) return () => { alive.current = false }
     load()
-    const t = intervalMs ? setInterval(load, intervalMs) : null
+    const t = intervalMs ? setInterval(() => load(), intervalMs) : null
     return () => { alive.current = false; if (t) clearInterval(t) }
-  }, [load, intervalMs])
+  }, [load, intervalMs, url])
   return { ...state, reload: load }
 }
 
@@ -43,6 +54,7 @@ export async function streamSSE(url, data, onEvent, signal) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data), signal,
   })
+  checkAuth(r)
   if (!r.ok || !r.body) {
     const body = await r.json().catch(() => ({}))
     throw new Error(body.detail || `${r.status} ${r.statusText}`)

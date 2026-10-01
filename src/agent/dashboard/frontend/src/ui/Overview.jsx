@@ -1,6 +1,8 @@
 import { ago } from '../lib/api'
 import { sectionTone, tone } from '../lib/tone'
+import { DailyBars, SpendChart } from './charts'
 import { Icon, Section, SectionHead } from './common'
+import ImpactStrip from './ImpactStrip'
 
 // Real CLI commands only (every one is in /api/commands). `confirmed` is set
 // only for k8s scan: discovery flags it destructive from its help text, but
@@ -26,7 +28,9 @@ const TILE = {
 function Tile({ s, onNav }) {
   const t = tone(sectionTone(s.status))
   const meta = TILE[s.title] || { icon: 'ph-circle' }
-  const [value, ...rest] = s.lines.length ? s.lines : ['—']
+  // the summary lines are written for Slack (`code`, ❌) — strip that formatting here
+  const plain = l => l.replace(/`/g, '').replace(/^\s*❌\s*/, '').replace(/\*/g, '')
+  const [value, ...rest] = s.lines.length ? s.lines.map(plain) : ['—']
   const clickable = !!meta.go
   const Tag = clickable ? 'button' : 'div'
   return (
@@ -40,7 +44,10 @@ function Tile({ s, onNav }) {
       <div className="kicker" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10.5, letterSpacing: '.07em' }}>
         <Icon name={meta.icon} size={14} />{s.title}
       </div>
-      <div style={{ fontSize: 14.5, fontWeight: 500, lineHeight: 1.3, color: t.t === 'unk' ? 'var(--st-unk)' : 'var(--color-text)' }}>{value}</div>
+      <div title={value} style={{
+        fontSize: 14.5, fontWeight: 500, lineHeight: 1.3, color: t.t === 'unk' ? 'var(--st-unk)' : 'var(--color-text)',
+        display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-word',
+      }}>{value}</div>
       <div className="muted" style={{ fontSize: 11.5, flex: 1 }}>{rest.slice(0, 2).join(' · ')}</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 500, color: t.c }}>
         <Icon name={t.icon} size={14} />{t.label}
@@ -49,10 +56,48 @@ function Tile({ s, onNav }) {
   )
 }
 
-export default function Overview({ summary, actions, onNav, onRun, daemonRunning }) {
+function ChartCard({ title, note, children }) {
+  return (
+    <div className="surface" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '12px 14px 8px', minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 13, fontWeight: 500 }}>{title}</span>
+        {note && <span className="muted" style={{ fontSize: 11.5 }}>{note}</span>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+function Charts({ chart, spend }) {
+  const s = spend.data
+  const total = s?.daily?.reduce((a, d) => a + d.amount, 0) || 0
+  return (
+    <Section>
+      <SectionHead title="Last 30 days" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 10 }}>
+        <ChartCard title="Heals per day" note="every action the daemon took on its own">
+          {chart.data ? <DailyBars labels={chart.data.labels} data={chart.data.data} unit=" actions"
+              empty="No daemon actions in the last 30 days." />
+            : <div className="muted" style={{ fontSize: 12, padding: '30px 0' }}>{chart.error ? `Couldn't load: ${chart.error}` : 'Loading…'}</div>}
+        </ChartCard>
+        <ChartCard title="AWS spend per day" note={s?.daily?.length ? `$${total.toFixed(2)} total · amber = statistical spike` : null}>
+          {s?.daily?.length ? <SpendChart daily={s.daily} mean={s.mean} anomalies={s.anomalies} />
+            : (
+              <div style={{ fontSize: 12, padding: '30px 0', color: 'var(--st-unk)', display: 'flex', gap: 6, alignItems: 'center' }}>
+                <Icon name="ph-question" />{spend.loading ? 'Loading…' : `Couldn't get Cost Explorer data${s?.error || spend.error ? `: ${s?.error || spend.error}` : ' (check AWS access)'}`}
+              </div>
+            )}
+        </ChartCard>
+      </div>
+    </Section>
+  )
+}
+
+export default function Overview({ summary, actions, chart, spend, live, onNav, onRun, daemonRunning }) {
   const sections = summary.data?.sections
   return (
     <div data-screen-label="01 Overview" style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+      <ImpactStrip live={live} chart={chart} />
       <Section>
         <SectionHead title="Status" note={summary.data ? `${summary.data.headline} · built ${ago(summary.data.generated_at)}` : null}>
           <span style={{ display: 'flex', gap: 12, fontSize: 11 }} className="muted">
@@ -72,6 +117,8 @@ export default function Overview({ summary, actions, onNav, onRun, daemonRunning
           {sections?.map(s => <Tile key={s.title} s={s} onNav={onNav} />)}
         </div>
       </Section>
+
+      <Charts chart={chart} spend={spend} />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(330px, 1fr))', gap: 22, alignItems: 'start' }}>
         <Section>

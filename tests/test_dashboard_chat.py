@@ -124,6 +124,9 @@ def test_read_tool_runs_and_the_answer_streams(env):
     assert types(ev) == ["tool_start", "tool_end", "text", "done"]
     assert ev[1]["ok"] is True and "CrashLoopBackOff" in ev[1]["result"]
     assert ev[-1]["stop"] == "end_turn"
+    # token usage summed over both model calls, for the cost line under the answer
+    assert ev[-1]["usage"]["input_tokens"] == 2 and ev[-1]["usage"]["output_tokens"] == 2
+    assert ev[-1]["usage"]["cost_usd"] > 0
     # the tool's output went back to the model as the next user turn
     last = env.claude.requests[1]["messages"][-1]
     assert last["role"] == "user" and last["content"][0]["tool_use_id"] == "t1"

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ago, postJSON } from '../lib/api'
+import { useDemo } from '../lib/demo'
 import { Icon, NoData, OkEmpty, Pill, SkeletonRows, TableCard } from './common'
 
 const OUT = {
@@ -30,6 +31,14 @@ function Card({ kicker, kickerIcon, summary, why, params, children }) {
 }
 
 function Decide({ busy, done, onApprove, onReject, approveLabel = 'Approve & apply' }) {
+  const demo = useDemo()
+  if (demo) return (
+    <>
+      <button className="btn btn-danger" disabled><Icon name="ph-check" />{approveLabel}</button>
+      <button className="btn btn-secondary" disabled><Icon name="ph-x" />Reject</button>
+      <span className="muted" style={{ fontSize: 11.5 }}>Disabled in demo mode.</span>
+    </>
+  )
   if (busy) return <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-accent)' }}><Icon name="ph-circle-notch" className="spin" />Applying…</div>
   if (done) return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>

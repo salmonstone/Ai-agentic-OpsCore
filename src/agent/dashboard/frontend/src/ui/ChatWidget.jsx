@@ -1,6 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { streamSSE } from '../lib/api'
+import { useDemo } from '../lib/demo'
 import { Icon } from './common'
+import Markdown from './Markdown'
+
+// Follow-up suggestions chosen from which tools the answer used — no extra
+// model call. First matching prefix wins.
+const FOLLOW_UPS = [
+  ['k8s_', ['Diagnose the worst pod', 'Show node CPU and memory', 'What did the daemon heal today?']],
+  ['jenkins_', ['Can this be fixed automatically?', 'Show recent builds of that job', 'Any other failing jobs?']],
+  ['github_actions', ['Diagnose the latest failed run', 'Is main passing?']],
+  ['cost_', ["What's driving the cost?", 'Any idle resources I can remove?']],
+  ['aws_', ["What's driving the cost?", 'Any unhealthy AWS resources?']],
+  ['tls_', ['Which certificates expire soonest?', 'Can AtlasOS renew them?']],
+  ['daily_summary', ["What's the most urgent thing?", 'Show pending approvals']],
+]
+const DEFAULT_FOLLOW_UPS = ["What's broken right now?", 'Show pending approvals']
+function followUpsFor(tools) {
+  for (const [prefix, list] of FOLLOW_UPS) if (tools.some(t => t.startsWith(prefix))) return list
+  return DEFAULT_FOLLOW_UPS
+}
+
+function CopyButton({ text }) {
+  const [done, setDone] = useState(false)
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 1500) } catch { /* clipboard blocked */ }
+  }
+  return (
+    <button className="btn btn-ghost" onClick={copy} title="Copy answer" aria-label="Copy answer" style={{ padding: '1px 4px', fontSize: 11, color: 'var(--muted)' }}>
+      <Icon name={done ? 'ph-check' : 'ph-copy'} />{done ? 'Copied' : 'Copy'}
+    </button>
+  )
+}
 
 const SUGGESTIONS = [
   { icon: 'ph-warning-circle', text: "What's broken right now?" },
@@ -24,15 +55,23 @@ const fmtParams = input => Object.entries(input || {}).map(([k, v]) => `${k.padE
 /** One streamed turn (a send or a decide) -> a reducer over the message list. */
 function useThread() {
   const [messages, setMessages] = useState([])
+  const [followUps, setFollowUps] = useState([])
   const textId = useRef(null)
+  const lastText = useRef(null)
+  const turnTools = useRef([])
   const seq = useRef(0)
   const nid = () => `m${++seq.current}`
   const patch = (id, p) => setMessages(ms => ms.map(m => (m.id === id ? { ...m, ...p } : m)))
 
   const onEvent = useCallback(ev => {
+    if (ev.type === 'done') {
+      if (ev.usage && lastText.current) patch(lastText.current, { usage: ev.usage })
+      if (ev.stop === 'end_turn') setFollowUps(followUpsFor(turnTools.current))
+    }
+    if (ev.type === 'tool_start') turnTools.current.push(ev.name)
     if (ev.type === 'text') {
       if (!textId.current) {
-        const id = nid(); textId.current = id
+        const id = nid(); textId.current = id; lastText.current = id
         setMessages(ms => [...ms, { id, kind: 'text', text: ev.delta, streaming: true }])
       } else {
         const id = textId.current
@@ -56,8 +95,9 @@ function useThread() {
   }, [])
 
   const push = m => setMessages(ms => [...ms, { id: nid(), ...m }])
+  const startTurn = () => { turnTools.current = []; lastText.current = null; setFollowUps([]) }
   const endTurn = () => { if (textId.current) { patch(textId.current, { streaming: false }); textId.current = null } }
-  return { messages, setMessages, onEvent, push, endTurn, patch }
+  return { messages, setMessages, onEvent, push, startTurn, endTurn, patch, followUps, setFollowUps }
 }
 
 function Chip({ m }) {
@@ -126,7 +166,8 @@ function ConfirmCard({ m, onDecide }) {
 }
 
 export default function ChatWidget({ open, setOpen, askRequest, context, info }) {
-  const { messages, setMessages, onEvent, push, endTurn, patch } = useThread()
+  const { messages, setMessages, onEvent, push, startTurn, endTurn, patch, followUps, setFollowUps } = useThread()
+  const demo = useDemo()
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const sid = useRef(sessionId())
@@ -137,6 +178,7 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
 
   const stream = useCallback(async (url, body) => {
     setBusy(true)
+    startTurn()
     try {
       await streamSSE(url, body, onEvent)
     } catch (e) {
@@ -144,7 +186,7 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
     }
     endTurn()
     setBusy(false)
-  }, [onEvent, endTurn])
+  }, [onEvent, startTurn, endTurn])
 
   const send = useCallback(text => {
     const t = text.trim()
@@ -167,6 +209,7 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
 
   const clear = async () => {
     setMessages([])
+    setFollowUps([])
     try { await fetch(`/api/chat/${sid.current}`, { method: 'DELETE' }) } catch { /* ignore */ }
   }
 
@@ -201,7 +244,9 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 14, fontWeight: 500 }}>AtlasOS Assistant</div>
           <div className="muted" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Runs skills on <span className="mono">{context || 'no cluster'}</span> · {mode}
+            {demo
+              ? <span style={{ color: 'var(--st-warn)' }}>Uses your live systems, not the demo data</span>
+              : <>Runs skills on <span className="mono">{context || 'no cluster'}</span> · {mode}</>}
           </div>
         </div>
         <button className="btn btn-ghost btn-icon" onClick={clear} aria-label="Clear chat" title="Clear chat" disabled={busy}><Icon name="ph-trash" size={16} /></button>
@@ -227,8 +272,20 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
             <div key={m.id} style={{ alignSelf: 'flex-end', maxWidth: '85%', padding: '8px 11px', borderRadius: '12px 12px 4px 12px', background: 'color-mix(in srgb, var(--color-accent) 16%, var(--color-surface))', border: '1px solid color-mix(in srgb, var(--color-accent) 32%, transparent)', fontSize: 13, whiteSpace: 'pre-wrap' }}>{m.text}</div>
           )
           if (m.kind === 'text') return (
-            <div key={m.id} style={{ alignSelf: 'flex-start', maxWidth: '94%', padding: '9px 12px', borderRadius: '12px 12px 12px 4px', background: 'color-mix(in srgb, var(--color-text) 5%, transparent)', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-              {m.text}{m.streaming && <span className="cursor" />}
+            <div key={m.id} style={{ alignSelf: 'flex-start', maxWidth: '94%', display: 'flex', flexDirection: 'column', gap: 3 }}>
+              <div style={{ padding: '9px 12px', borderRadius: '12px 12px 12px 4px', background: 'color-mix(in srgb, var(--color-text) 5%, transparent)', fontSize: 13, lineHeight: 1.5, wordBreak: 'break-word' }}>
+                <Markdown text={m.text} />{m.streaming && <span className="cursor" />}
+              </div>
+              {!m.streaming && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 4 }}>
+                  <CopyButton text={m.text} />
+                  {m.usage?.cost_usd > 0 && (
+                    <span className="mono muted" style={{ fontSize: 10.5 }} title={`${m.usage.input_tokens} input + ${m.usage.output_tokens} output tokens`}>
+                      ${m.usage.cost_usd < 0.01 ? m.usage.cost_usd.toFixed(4) : m.usage.cost_usd.toFixed(3)} · {(m.usage.input_tokens + m.usage.output_tokens).toLocaleString()} tokens
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           )
           if (m.kind === 'chip') return <Chip key={m.id} m={m} />
@@ -245,6 +302,15 @@ export default function ChatWidget({ open, setOpen, askRequest, context, info })
           )
           return null
         })}
+        {!busy && followUps.length > 0 && messages.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
+            {followUps.map(f => (
+              <button key={f} onClick={() => send(f)} className="hoverable" style={{ padding: '4px 10px', borderRadius: 999, border: '1px solid var(--color-divider)', background: 'transparent', fontSize: 11.5, color: 'var(--color-accent)' }}>
+                {f}
+              </button>
+            ))}
+          </div>
+        )}
         {busy && !messages.some(m => m.streaming || (m.kind === 'chip' && m.running)) && (
           <div className="muted" style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}><Icon name="ph-circle-notch" className="spin" />Thinking…</div>
         )}

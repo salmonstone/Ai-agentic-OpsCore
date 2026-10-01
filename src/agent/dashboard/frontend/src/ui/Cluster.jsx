@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ago } from '../lib/api'
 import { POD_TONE, TC } from '../lib/tone'
 import { Bar, Icon, NoData, OkEmpty, Pill, Section, SectionHead, SkeletonRows, TableCard } from './common'
+import ConnectCluster from './ConnectCluster'
 
 const pctTone = p => (p == null ? TC.unk : p >= 90 ? TC.crit : p >= 75 ? TC.warn : TC.ok)
 
@@ -15,7 +16,7 @@ function Pct({ v }) {
   )
 }
 
-export default function Cluster({ cluster, onAsk }) {
+export default function Cluster({ cluster, onAsk, onConnected }) {
   const [healedOpen, setHealedOpen] = useState(true)
   const d = cluster.data
 
@@ -24,12 +25,16 @@ export default function Cluster({ cluster, onAsk }) {
 
   if (!d.reachable) {
     return (
-      <div data-screen-label="02 Cluster (unreachable)" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
-        {[['Nodes', 'Not "0 nodes" — nothing was returned.'],
-          ['Problem pods', 'Not "no problem pods" — AtlasOS couldn\'t look.'],
-          ['Healed in last 24h', `${d.healed.length} recorded by the daemon (from its own log, not the cluster).`]].map(([label, note]) => (
-          <NoData key={label} label={label} note={note} />
-        ))}
+      <div data-screen-label="02 Cluster (unreachable)" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+          {[['Nodes', 'Not "0 nodes" — nothing was returned.'],
+            ['Problem pods', 'Not "no problem pods" — AtlasOS couldn\'t look.'],
+            ['Healed in last 24h', `${d.healed.length} recorded by the daemon (from its own log, not the cluster).`]].map(([label, note]) => (
+            <NoData key={label} label={label} note={note} />
+          ))}
+        </div>
+        {d.error && <code className="term" style={{ fontSize: 11.5, padding: '6px 9px' }}>{d.error}</code>}
+        <ConnectCluster onConnected={() => { cluster.reload(); onConnected?.() }} />
       </div>
     )
   }
