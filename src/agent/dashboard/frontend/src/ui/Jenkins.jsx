@@ -1,10 +1,11 @@
 import { ago, dur } from '../lib/api'
 import { BUILD_TONE, TC } from '../lib/tone'
 import { Icon, NoData, OkEmpty, Pill, Section, SectionHead, SkeletonRows, TableCard } from './common'
+import { logSources } from './LogViewer'
 
 const TREND_C = { SUCCESS: TC.ok, FAILURE: TC.crit, UNSTABLE: TC.warn, ABORTED: 'var(--muted)', RUNNING: TC.accent }
 
-export default function Jenkins({ builds, onAsk }) {
+export default function Jenkins({ builds, onAsk, onLogs }) {
   const d = builds.data
   if (!d && builds.loading) return <SkeletonRows rows={6} />
   if (!d) return <NoData label="Failed builds · Jobs" note="Not &quot;no failed builds&quot; — the dashboard server didn't answer." error={builds.error} onRetry={() => builds.reload()} />
@@ -41,11 +42,9 @@ export default function Jenkins({ builds, onAsk }) {
                   <button className="btn btn-primary" onClick={() => onAsk(`Diagnose Jenkins build ${b.job} #${b.number}. What's the root cause and can it be fixed automatically?`)}>
                     <Icon name="ph-sparkle" />Diagnose
                   </button>
-                  {d.url && (
-                    <a className="btn btn-secondary" href={`${d.url.replace(/\/$/, '')}/job/${b.job.split('/').map(encodeURIComponent).join('/job/')}/${b.number}/console`} target="_blank" rel="noreferrer">
-                      <Icon name="ph-file-text" />Console log
-                    </a>
-                  )}
+                  <button className="btn btn-secondary" onClick={() => onLogs(logSources.jenkins(b.job, b.number))}>
+                    <Icon name="ph-file-text" />Build log
+                  </button>
                 </div>
               </article>
             </div>

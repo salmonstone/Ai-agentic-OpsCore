@@ -3,6 +3,7 @@ import { ago } from '../lib/api'
 import { POD_TONE, TC } from '../lib/tone'
 import { Bar, Icon, NoData, OkEmpty, Pill, Section, SectionHead, SkeletonRows, TableCard } from './common'
 import ConnectCluster from './ConnectCluster'
+import { logSources } from './LogViewer'
 
 const pctTone = p => (p == null ? TC.unk : p >= 90 ? TC.crit : p >= 75 ? TC.warn : TC.ok)
 
@@ -16,7 +17,7 @@ function Pct({ v }) {
   )
 }
 
-export default function Cluster({ cluster, onAsk, onConnected }) {
+export default function Cluster({ cluster, onAsk, onConnected, onLogs }) {
   const [healedOpen, setHealedOpen] = useState(true)
   const d = cluster.data
 
@@ -80,7 +81,11 @@ export default function Cluster({ cluster, onAsk, onConnected }) {
                       <td className="mono" style={{ fontSize: 12 }}>{p.ready}</td>
                       <td className="mono" style={{ fontSize: 12, color: p.restarts > 5 ? TC.crit : undefined }}>{p.restarts}</td>
                       <td className="mono muted" style={{ fontSize: 11.5 }}>{p.age}</td>
-                      <td style={{ textAlign: 'right' }}>
+                      <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <button className="btn btn-ghost" style={{ fontSize: 12, padding: '3px 6px' }}
+                          onClick={() => onLogs(logSources.pod(p.namespace, p.name))}>
+                          <Icon name="ph-scroll" />Logs
+                        </button>
                         <button className="btn btn-ghost" style={{ fontSize: 12, padding: '3px 6px' }}
                           onClick={() => onAsk(`Why is pod ${p.name} in namespace ${p.namespace} ${p.status}? Diagnose it.`)}>
                           <Icon name="ph-sparkle" />Diagnose

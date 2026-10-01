@@ -10,6 +10,8 @@ import { Icon } from './ui/common'
 import Incidents from './ui/Incidents'
 import Jenkins from './ui/Jenkins'
 import Login from './ui/Login'
+import LogViewer from './ui/LogViewer'
+import Settings from './ui/Settings'
 import Overview, { QUICK } from './ui/Overview'
 import Palette from './ui/Palette'
 import RunDrawer from './ui/RunDrawer'
@@ -22,6 +24,7 @@ const TITLES = {
   approvals: ['Approvals', 'Fixes waiting for a human — the same queue as Slack'],
   incidents: ['Incidents & SLOs', 'Open incidents and error budgets'],
   commands: ['Command Runner', 'Every agent CLI command, with its options'],
+  settings: ['Settings', 'Connect your tools, protect the dashboard, read AtlasOS logs'],
   about: ['About AtlasOS', 'Skills, and everything the assistant can run'],
 }
 
@@ -66,15 +69,15 @@ function useRefresh(poll, refreshKey) {
   }, [refreshKey]) // eslint-disable-line react-hooks/exhaustive-deps
 }
 
-function ClusterPanel({ refreshKey, onAsk, onConnected }) {
+function ClusterPanel({ refreshKey, onAsk, onConnected, onLogs }) {
   const cluster = useData('cluster', '/api/cluster', 30000)
   useRefresh(cluster, refreshKey)
-  return <Cluster cluster={cluster} onAsk={onAsk} onConnected={onConnected} />
+  return <Cluster cluster={cluster} onAsk={onAsk} onConnected={onConnected} onLogs={onLogs} />
 }
-function JenkinsPanel({ refreshKey, onAsk }) {
+function JenkinsPanel({ refreshKey, onAsk, onLogs }) {
   const builds = useData('jenkins', '/api/jenkins/builds', 60000)
   useRefresh(builds, refreshKey)
-  return <Jenkins builds={builds} onAsk={onAsk} />
+  return <Jenkins builds={builds} onAsk={onAsk} onLogs={onLogs} />
 }
 function IncidentsPanel({ refreshKey, onAsk }) {
   const incidents = useData('incidents', '/api/incidents', 30000)
@@ -156,6 +159,7 @@ function Shell() {
   const [navOpen, setNavOpen] = useState(false)
   const [cmdSel, setCmdSel] = useState(null)
   const [toast, setToast] = useState(null)
+  const [logSource, setLogSource] = useState(null)
   const lastQuick = useRef(null)
   const width = useWidth()
   const mobile = width < 900
@@ -304,15 +308,17 @@ function Shell() {
           )}
 
           {panel === 'overview' && <Overview summary={summary} actions={actions} chart={chart} spend={spend} live={live} onNav={setPanel} onRun={runQuick} daemonRunning={!!live?.stats?.daemon_running} />}
-          {panel === 'cluster' && <ClusterPanel refreshKey={refreshKey} onAsk={ask} onConnected={() => clusters.reload()} />}
-          {panel === 'jenkins' && <JenkinsPanel refreshKey={refreshKey} onAsk={ask} />}
+          {panel === 'cluster' && <ClusterPanel refreshKey={refreshKey} onAsk={ask} onConnected={() => clusters.reload()} onLogs={setLogSource} />}
+          {panel === 'jenkins' && <JenkinsPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
+          {panel === 'settings' && <Settings key={refreshKey} live={live} context={context} onNav={setPanel} onLogs={setLogSource} />}
           {panel === 'approvals' && <Approvals approvals={approvals} deploys={deploys} onChanged={() => { approvals.reload(); deploys.reload() }} />}
           {panel === 'incidents' && <IncidentsPanel refreshKey={refreshKey} onAsk={ask} />}
           {panel === 'commands' && <Commands key={cmdSel || 'none'} commands={commands} context={context} initial={cmdSel} />}
           {panel === 'about' && <AboutPanel refreshKey={refreshKey} about={about} chatInfo={chatInfo} />}
         </main>
 
-        <RunDrawer run={run} onClose={() => setRun(null)} onRerun={lastQuick.current ? () => runQuick(lastQuick.current) : null} onAsk={askAboutRun} />
+        <LogViewer source={logSource} onClose={() => setLogSource(null)} onAsk={ask} />
+        <RunDrawer run={run}onClose={() => setRun(null)} onRerun={lastQuick.current ? () => runQuick(lastQuick.current) : null} onAsk={askAboutRun} />
         <ChatWidget open={chatOpen} setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo} />
         <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} nav={NAV} quick={quickItems} commands={allCommands}
           onNav={setPanel} onRun={runQuick} onPickCommand={c => { setCmdSel(c); setPanel('commands') }} onAsk={ask} toggles={toggles} />

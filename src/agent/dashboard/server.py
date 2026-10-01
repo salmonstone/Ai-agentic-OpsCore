@@ -1084,6 +1084,127 @@ async def api_chat_clear(session_id: str) -> JSONResponse:
     return JSONResponse({"cleared": True})
 
 
+# ── settings & integrations ───────────────────────────────────────────────────
+# Same storage as the CLI (core/settings_store.py → keychain / .env). Reading
+# never returns a secret's value. Writing needs the dashboard to be protected
+# (DASHBOARD_TOKEN set) — otherwise anyone who reached this page could swap
+# your Slack webhook or AWS keys; the guard then requires the login too.
+
+class SettingsSave(BaseModel):
+    values: dict[str, str] = {}
+    clear: list[str] = []
+
+@app.get("/api/settings")
+def api_settings() -> JSONResponse:
+    from agent.core import settings_store
+    return JSONResponse(settings_store.describe() | {"protected": bool(expected_token())})
+
+@app.post("/api/settings")
+def api_settings_save(req: SettingsSave) -> JSONResponse:
+    from agent.core import settings_store
+    if not expected_token():
+        return JSONResponse({"detail": "Protect the dashboard first (Settings → Protect this dashboard) — "
+                                       "saving credentials from a web page needs a login."}, status_code=403)
+    try:
+        notes = settings_store.save(req.values, req.clear)
+    except settings_store.SettingsError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+    _summary_cache["data"] = None          # tiles should reflect the new connections
+    return JSONResponse({"saved": True, "notes": notes,
+                         "restart_note": "Applied to the dashboard now. The daemon and MCP server "
+                                         "pick it up the next time they restart."})
+
+@app.post("/api/settings/check/{integration_id}")
+async def api_settings_check(integration_id: str) -> JSONResponse:
+    from agent.core import settings_store
+    try:
+        result = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, settings_store.check, integration_id), timeout=25)
+    except asyncio.TimeoutError:
+        result = {"status": "error", "detail": "No answer within 25s."}
+    except settings_store.SettingsError as exc:
+        raise HTTPException(404, str(exc))
+    return JSONResponse(result)
+
+@app.post("/api/settings/slack-test")
+def api_settings_slack_test() -> JSONResponse:
+    from agent.integrations.slack import is_configured, send_alert_generic
+    if not is_configured():
+        return JSONResponse({"sent": False, "detail": "No Slack webhook set."}, status_code=400)
+    ok = send_alert_generic(title="AtlasOS test message",
+                            message="Sent from the dashboard's Settings page — Slack is connected.",
+                            severity="info")
+    return JSONResponse({"sent": bool(ok), "detail": "" if ok else "Slack rejected the message."})
+
+@app.post("/api/settings/protect")
+def api_settings_protect(request: Request) -> JSONResponse:
+    """First-run: create DASHBOARD_TOKEN in the keychain, log this browser in,
+    and return the token once so the user can save it. Refused if a token
+    already exists (changing it needs the old login — use the CLI)."""
+    if expected_token():
+        return JSONResponse({"detail": "This dashboard is already protected."}, status_code=409)
+    from agent.core import secrets as sec
+    token = sec.generate_token()
+    try:
+        sec.store("DASHBOARD_TOKEN", token)
+    except sec.SecretsError as exc:
+        return JSONResponse({"detail": f"Couldn't store the token: {exc}"}, status_code=500)
+    os.environ["DASHBOARD_TOKEN"] = token
+    resp = JSONResponse({"protected": True, "token": token})
+    resp.set_cookie(COOKIE, token, httponly=True, samesite="strict",
+                    secure=request.url.scheme == "https", max_age=30 * 86400, path="/")
+    return resp
+
+
+# ── logs: pods, Jenkins builds, AtlasOS itself ────────────────────────────────
+_SYSTEM_LOGS = {
+    "daemon": ("Daemon", Path("data/daemon.log")),
+    "dashboard": ("Dashboard server", Path("data/logs/dashboard.log")),
+    "mcp": ("MCP server", Path("data/logs/mcp.log")),
+    "supervisor": ("Supervisor", Path("data/logs/supervisor.log")),
+    "ngrok": ("ngrok tunnel", Path("data/logs/ngrok.log")),
+    "summary": ("Daily summary (last run)", Path("data/logs/summary-last-run.log")),
+}
+
+def _tail(path: Path, lines: int) -> str:
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - 512 * 1024))
+        text = f.read().decode("utf-8", errors="replace")
+    return "\n".join(text.splitlines()[-lines:])
+
+@app.get("/api/logs/system")
+def api_logs_system(name: str = "", lines: int = 400) -> JSONResponse:
+    from agent.dashboard.security import redact
+    if not name:
+        return JSONResponse({"logs": [{"name": k, "label": v[0], "exists": v[1].exists()} for k, v in _SYSTEM_LOGS.items()]})
+    if name not in _SYSTEM_LOGS:
+        raise HTTPException(404, "Unknown log")
+    label, path = _SYSTEM_LOGS[name]
+    if not path.exists():
+        return JSONResponse({"name": name, "label": label, "text": "", "missing": True})
+    return JSONResponse({"name": name, "label": label, "text": redact(_tail(path, max(20, min(lines, 5000))))})
+
+@app.get("/api/logs/pod")
+def api_logs_pod(namespace: str, pod: str, lines: int = 300) -> JSONResponse:
+    from agent.dashboard.security import redact
+    from agent.integrations.kubectl import get_pod_events, get_pod_logs, is_cluster_available
+    if not is_cluster_available():
+        return JSONResponse({"error": "Cluster unreachable — couldn't fetch logs."}, status_code=503)
+    return JSONResponse({"logs": redact(get_pod_logs(pod, namespace, lines=max(20, min(lines, 5000)))),
+                         "events": get_pod_events(pod, namespace)})
+
+@app.get("/api/logs/jenkins")
+def api_logs_jenkins(job: str, build: int, lines: int = 600) -> JSONResponse:
+    from agent.dashboard.security import redact
+    from agent.integrations import jenkins as jk
+    try:
+        text = jk.get_console_log(job, build, tail_lines=max(20, min(lines, 10000)))
+    except Exception as exc:
+        return JSONResponse({"error": f"Couldn't fetch the build log: {str(exc)[:300]}"}, status_code=502)
+    return JSONResponse({"logs": redact(text)})
+
+
 # ── SPA catch-all (must be last — only when dist/ is present) ─────────────────
 if _DIST.exists():
     @app.get("/{full_path:path}")

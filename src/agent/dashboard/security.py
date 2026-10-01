@@ -26,6 +26,32 @@ PUBLIC_PATHS = {"/api/login", "/api/logout", "/api/auth/status"}
 _DEV_ORIGINS = {"localhost:5173", "127.0.0.1:5173"}   # vite dev server proxy
 
 
+import re
+
+# Credential shapes masked out of any log text the dashboard displays.
+_REDACT = [
+    (re.compile(r"(?i)(token|secret|password|api[_-]?key|routing[_-]?key|authorization)(\"?\s*[:=]\s*\"?|=)([^\s\"'&,]+)"), r"\1\2••••"),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer ••••"),
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_-]{10,}"), "sk-ant-••••"),
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "xox•-••••"),
+    (re.compile(r"\b(AKIA|ASIA)[A-Z0-9]{16}\b"), r"\1••••"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "gh•_••••"),
+    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+"), "https://hooks.slack.com/services/••••"),
+]
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
+
+
+def redact(text: str) -> str:
+    """Prepare log text for display: drop terminal colour codes (AtlasOS's own
+    logs are written for a terminal), then mask credentials."""
+    text = _ANSI.sub("", text)
+    for pattern, repl in _REDACT:
+        text = pattern.sub(repl, text)
+    return text
+
+
 def expected_token() -> str:
     return os.environ.get("DASHBOARD_TOKEN", "").strip()
 
