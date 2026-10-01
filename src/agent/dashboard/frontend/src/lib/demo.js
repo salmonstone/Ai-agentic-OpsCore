@@ -161,6 +161,68 @@ const DEMO = {
       },
     }
   },
+  deploys_setup: () => ({
+    secret_set: true, secret_where: 'keychain', protected: true,
+    urls: ['https://demo-atlas.ngrok-free.app/webhook/github'], local_url: 'http://127.0.0.1:8000/webhook/github', error: null,
+    mappings: [
+      { repo: 'salmonstone/billing-api', branch: 'main', deployment: 'billing-api', namespace: 'prod', image_prefix: '1234.dkr.ecr.ap-south-1.amazonaws.com/billing-api', auto_approve_low_risk: false },
+      { repo: 'salmonstone/docs-site', branch: 'main', deployment: 'docs', namespace: 'web', image_prefix: '', auto_approve_low_risk: true },
+    ],
+    history: [
+      { id: 'd1', repo: 'salmonstone/billing-api', branch: 'main', deployment: 'billing-api', namespace: 'prod', new_image: 'billing-api:4f1c2e9', risk_label: 'MEDIUM', status: 'deployed', created_at: iso(3 * H) },
+      { id: 'd2', repo: 'salmonstone/docs-site', branch: 'main', deployment: 'docs', namespace: 'web', new_image: 'docs:a71b003', risk_label: 'LOW', status: 'deployed', created_at: iso(D) },
+      { id: 'd3', repo: 'salmonstone/billing-api', branch: 'main', deployment: 'billing-api', namespace: 'prod', new_image: 'billing-api:9e02d1a', risk_label: 'HIGH', status: 'rejected', created_at: iso(2 * D) },
+    ],
+  }),
+  runbooks: () => ({
+    file: 'data\\runbooks.yaml',
+    runbooks: [
+      { id: 'disk-full', name: 'Disk Full Recovery', description: 'When PVC is almost full: clean images, expand PVC, alert team', trigger_condition: 'pvc_usage_pct > 85', vars: ['namespace', 'pvc_name', 'usage_pct', 'pod_name'],
+        steps: [{ name: 'alert_start', type: 'slack', detail: 'Disk full recovery started for {namespace}/{pvc_name}', on_failure: 'escalate' }, { name: 'clean_docker_images', type: 'kubectl', detail: 'exec {pod_name} -n {namespace} -- docker image prune -f', on_failure: 'continue' }, { name: 'expand_pvc', type: 'python', detail: 'expand_pvc', on_failure: 'escalate' }] },
+      { id: 'node-not-ready', name: 'Node Not Ready', description: 'Cordon and drain a NotReady node so pods reschedule', trigger_condition: 'node.status == NotReady', vars: ['node_name'],
+        steps: [{ name: 'cordon', type: 'kubectl', detail: 'cordon {node_name}', on_failure: 'escalate' }, { name: 'drain', type: 'kubectl', detail: 'drain {node_name} --ignore-daemonsets', on_failure: 'escalate' }] },
+    ],
+    runs: [
+      { id: 'r1', runbook_id: 'disk-full', trigger: 'daemon', status: 'success', steps_done: 4, steps_total: 4, started_at: iso(6 * H) },
+      { id: 'r2', runbook_id: 'node-not-ready', trigger: 'manual', status: 'partial', steps_done: 1, steps_total: 2, started_at: iso(3 * D) },
+    ],
+  }),
+  scale: () => ({
+    daemon_running: true,
+    policies: [
+      { id: 'p1', deployment: 'worker', namespace: 'staging', schedule_down_utc: '17:30', schedule_up_utc: '03:30', down_replicas: 0, up_replicas: 2, cpu_threshold_pct: 80, max_replicas: 10, enabled: 1 },
+      { id: 'p2', deployment: 'api', namespace: 'prod', schedule_down_utc: '19:00', schedule_up_utc: '02:30', down_replicas: 2, up_replicas: 4, cpu_threshold_pct: 75, max_replicas: 12, enabled: 1 },
+    ],
+    events: [
+      { id: 'e1', deployment: 'worker', namespace: 'staging', old_replicas: 2, new_replicas: 0, reason: 'scheduled scale-down 17:30 UTC', status: 'done', created_at: iso(2 * H) },
+      { id: 'e2', deployment: 'api', namespace: 'prod', old_replicas: 4, new_replicas: 6, reason: 'CPU 91% > 75%', status: 'done', created_at: iso(9 * H) },
+    ],
+  }),
+  summary_info: () => ({
+    slack: true, schedule: { available: true, schedule: 'Daily', next_run: 'tomorrow 9:00 AM', last_run: 'today 9:00 AM', status: 'Ready' },
+    history: [0, 1, 2, 3].map(i => ({ id: `s${i}`, title: '☀️ AtlasOS daily summary', created_at: iso(i * D + 2 * H), kind: 'summary' })),
+  }),
+  domains: () => {
+    const ok = { ok: true }
+    return {
+      reachable: true,
+      results: [
+        { found: true, domain: 'app.atlasdemo.dev', ingress: { name: 'web', namespace: 'prod' }, checks: { lb: ok, dns: ok, tls_section: ok, tls_cert: ok, tls_secret: ok, http: ok, https: ok, backend: ok }, diagnosis: { overall_status: 'live' } },
+        { found: true, domain: 'grafana.atlasdemo.dev', ingress: { name: 'grafana', namespace: 'monitoring' }, checks: { lb: ok, dns: ok, tls_section: { ok: false, error: 'Ingress has no spec.tls' }, tls_cert: { ok: false }, tls_secret: { ok: false }, http: ok, https: { ok: false, error: 'SSL handshake failed' }, backend: ok },
+          diagnosis: { overall_status: 'degraded', root_cause: 'The Ingress has no TLS section, so the controller serves its default certificate.', suggested_fix: 'Add spec.tls for grafana.atlasdemo.dev pointing at the cert-manager secret.', fix_command: 'kubectl patch ingress grafana -n monitoring --type=merge -p \'{"spec":{"tls":[{"hosts":["grafana.atlasdemo.dev"],"secretName":"grafana-tls"}]}}\'' } },
+      ],
+    }
+  },
+  databases: () => ({
+    reachable: true, region: 'ap-south-1', generated_at: iso(4 * M),
+    databases: [
+      { instance: { id: 'prod-postgres', engine: 'postgres', class: 'db.t4g.medium', status: 'available', storage_gb: 100, storage_type: 'gp3', multi_az: true, endpoint: 'prod-postgres.abc123.ap-south-1.rds.amazonaws.com', port: 5432 },
+        metrics: { cpu_pct: 41.2, connections_max: 88, free_storage_gb: 9.1, read_latency_ms: 1.4, freeable_memory_mb: 812 }, status: 'critical', incident_id: 'a81c22f0',
+        issues: [{ type: 'LOW_STORAGE', severity: 'critical', detail: 'Only 9.1GB free', fix: 'Increase allocated storage or enable storage autoscaling' }] },
+      { instance: { id: 'analytics-mysql', engine: 'mysql', class: 'db.t3.small', status: 'available', storage_gb: 50, storage_type: 'gp2', multi_az: false, endpoint: 'analytics.abc123.ap-south-1.rds.amazonaws.com', port: 3306 },
+        metrics: { cpu_pct: 12.5, connections_max: 14, free_storage_gb: 37.8, read_latency_ms: 0.9, freeable_memory_mb: 640 }, status: 'healthy', incident_id: '', issues: [] },
+    ],
+  }),
   spend: () => {
     const base = [12.1, 12.4, 12.8, 13.1, 12.6, 12.2, 11.9, 12.3, 12.7, 13.0, 12.5, 12.4, 12.9, 13.2, 12.6,
       12.1, 12.0, 12.8, 21.7, 13.1, 12.7, 12.4, 12.6, 12.9, 13.3, 12.8, 12.6, 13.9, 13.4, 13.1]
@@ -182,3 +244,18 @@ export function useData(key, url, intervalMs = 0, demoFlag) {
 }
 
 export const demoLive = () => DEMO.live()
+
+export const DEMO_ACTIVITY = () => ({
+  sources: { dashboard: 4, approvals: 3, 'auto-healer': 5, backup: 2, deployment: 2, 'k8s-diagnose': 40 },
+  action_sources: ['dashboard', 'approvals', 'auto-healer', 'backup', 'deployment'],
+  items: [
+    { id: 'a1', source: 'dashboard', created_at: iso(3 * M), content: 'Dashboard: acknowledged incident INC-142' },
+    { id: 'a2', source: 'auto-healer', created_at: iso(4 * M), content: 'Restarted pod prod/api-7f9c-x2kqd — CrashLoopBackOff, 14 restarts. Picked up the rotated db-credentials secret; Running 1/1 after 12s.' },
+    { id: 'a3', source: 'approvals', created_at: iso(3 * H), content: 'Approval demo-h1 (k8s_apply_fix) approved by aditya (Slack) -> APPLIED: Restart pod etl-runner-6c4f9 in data' },
+    { id: 'a4', source: 'deployment', created_at: iso(3 * H + 20 * M), content: 'Deployed billing-api:4f1c2e9 to prod/billing-api — risk MEDIUM, healthy after 94s' },
+    { id: 'a5', source: 'dashboard', created_at: iso(5 * H), content: 'Dashboard: scaling policy for worker/staging — down 17:30 UTC to 0, up 03:30 UTC to 2' },
+    { id: 'a6', source: 'backup', created_at: iso(6 * H), content: 'Backup atlasos-20261001T083914Z.tar.gz created (972 KB)' },
+    { id: 'a7', source: 'dashboard', created_at: iso(D + H), content: "Dashboard: created SLO 'API availability' for api/prod (99.9% over 30d)" },
+    { id: 'a8', source: 'approvals', created_at: iso(D + 2 * H), content: 'Approval demo-h2 (tls_apply_fix) rejected by dashboard: Renew certificate for grafana.internal' },
+  ],
+})

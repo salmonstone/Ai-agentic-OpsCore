@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { postJSON, usePoll } from '../lib/api'
 import { useDemo } from '../lib/demo'
 import { tone } from '../lib/tone'
-import { Icon, NoData, Section, SectionHead, SkeletonRows } from './common'
+import { notifyEnabled, notifySupported, onNotifyChange, setNotify, showNotification } from '../lib/notify'
+import { ConfirmButton, Icon, Msg, NoData, Section, SectionHead, SkeletonRows } from './common'
 
 const STATUS = {
   ok: ['ok', 'Connected', 'ph-check-circle'],
@@ -27,12 +28,18 @@ function Protection({ protectedNow, onProtected }) {
   const [err, setErr] = useState(null)
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [rotated, setRotated] = useState(false)
   const protect = async () => {
     setBusy(true); setErr(null)
     try { const r = await postJSON('/api/settings/protect'); setToken(r.token); onProtected() } catch (e) { setErr(e.message) }
     setBusy(false)
   }
   const logout = async () => { await postJSON('/api/logout'); location.reload() }
+  const rotate = async () => {
+    setBusy(true); setErr(null)
+    try { const r = await postJSON('/api/settings/rotate-token'); setToken(r.token); setRotated(true) } catch (e) { setErr(e.message) }
+    setBusy(false)
+  }
   const copy = async () => { try { await navigator.clipboard.writeText(token); setCopied(true) } catch { /* blocked */ } }
 
   return (
@@ -54,13 +61,48 @@ function Protection({ protectedNow, onProtected }) {
               <code className="term" style={{ padding: '7px 10px', fontSize: 12.5, userSelect: 'all' }}>{token}</code>
               <button className="btn btn-secondary" onClick={copy}><Icon name={copied ? 'ph-check' : 'ph-copy'} />{copied ? 'Copied' : 'Copy'}</button>
             </div>
-            <div className="muted" style={{ fontSize: 11.5 }}>It's stored in your OS keychain as DASHBOARD_TOKEN. This browser is already logged in.</div>
+            <div className="muted" style={{ fontSize: 11.5 }}>It's stored in your OS keychain as DASHBOARD_TOKEN. This browser is already logged in{rotated ? '; every other browser now needs the new token' : ''}.</div>
           </div>
         )}
         {err && <div style={{ fontSize: 12, color: 'var(--st-crit)' }}><Icon name="ph-x-circle" /> {err}</div>}
       </div>
       {!protectedNow && !token && <button className="btn btn-primary" onClick={protect} disabled={busy}><Icon name="ph-lock-key" />{busy ? 'Protecting…' : 'Protect this dashboard'}</button>}
-      {protectedNow && !token && <button className="btn btn-secondary" onClick={logout}><Icon name="ph-sign-out" />Log out</button>}
+      {protectedNow && !token && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <ConfirmButton danger icon="ph-arrows-clockwise" busy={busy} onConfirm={rotate} confirmLabel="Log out everyone else?">Rotate token</ConfirmButton>
+          <button className="btn btn-secondary" onClick={logout}><Icon name="ph-sign-out" />Log out</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DesktopAlerts() {
+  const demo = useDemo()
+  const [on, setOn] = useState(notifyEnabled)
+  const [msg, setMsg] = useState(null)
+  useEffect(() => onNotifyChange(() => setOn(notifyEnabled())), [])
+  const toggle = async () => {
+    setMsg(null)
+    const r = await setNotify(!on)
+    if (r === 'denied') setMsg({ ok: false, text: 'The browser blocked notifications — allow them for this site in the address bar, then try again.' })
+    setOn(notifyEnabled())
+  }
+  const supported = notifySupported()
+  return (
+    <div className="surface" style={{ display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap', padding: 16 }}>
+      <Icon name="ph-bell-ringing" size={20} style={{ color: 'var(--color-accent)', marginTop: 2 }} />
+      <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div style={{ fontSize: 14, fontWeight: 500 }}>Desktop alerts {on ? <span style={{ color: 'var(--st-ok)', fontSize: 12 }}>· on</span> : <span className="muted" style={{ fontSize: 12 }}>· off</span>}</div>
+        <div className="muted" style={{ fontSize: 12.5 }}>
+          {supported ? 'A pop-up from this browser for critical and warning alerts, incidents and approvals — even when this tab is in the background. Works while the dashboard is open in a tab; Slack still covers the rest.' : "This browser doesn't support desktop notifications."}
+        </div>
+        <Msg msg={msg} />
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        {on && <button className="btn btn-ghost" onClick={() => showNotification('Test alert', 'Desktop alerts work — you will see critical alerts like this.', 'test')}>Send test</button>}
+        <button className={`btn ${on ? 'btn-secondary' : 'btn-primary'}`} onClick={toggle} disabled={!supported || demo}><Icon name={on ? 'ph-bell-slash' : 'ph-bell-ringing'} />{on ? 'Turn off' : 'Turn on'}</button>
+      </div>
     </div>
   )
 }
@@ -179,6 +221,7 @@ export default function Settings({ live, context, onNav }) {
       {d && (
         <>
           <Protection protectedNow={d.protected} onProtected={() => settings.reload()} />
+          <DesktopAlerts />
           {!d.keychain && (
             <div className="nodata"><div style={{ color: 'var(--st-unk)' }}><Icon name="ph-question" /> No OS keychain found on this machine — secrets can't be saved from here.</div></div>
           )}

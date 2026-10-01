@@ -28,6 +28,17 @@ def _isolated_notification_inbox(tmp_path, monkeypatch):
     monkeypatch.setattr(notifications, "_DB_PATH", tmp_path / "notifications.db")
 
 
+@pytest.fixture(autouse=True)
+def audit_log(monkeypatch):
+    """Dashboard actions go to the audit trail (memory.db + vector index +
+    vault) — collect them in a list instead, synchronously, so tests can
+    assert on them and never touch the real memory store."""
+    from agent.dashboard import audit
+    lines: list[str] = []
+    monkeypatch.setattr(audit, "record", lambda content, **meta: lines.append(content))
+    return lines
+
+
 def _fake_keychain_token() -> str:
     """Only a test's in-memory FakeKeyring counts; the real keychain is ignored."""
     from agent.core import secrets as sec

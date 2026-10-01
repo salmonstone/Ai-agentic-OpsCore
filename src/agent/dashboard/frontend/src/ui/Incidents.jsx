@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { ago, getJSON, postJSON } from '../lib/api'
+import { ago, delJSON, getJSON, postJSON } from '../lib/api'
 import { useDemo } from '../lib/demo'
 import { tone } from '../lib/tone'
-import { Icon, NoData, OkEmpty, Pill, Section, SectionHead, SkeletonRows } from './common'
+import { ConfirmButton, Field, Icon, Msg, NoData, OkEmpty, Pill, Section, SectionHead, SkeletonRows } from './common'
 
 const EV_ICON = { opened: 'ph-siren', acknowledged: 'ph-eye', resolved: 'ph-check-circle', escalated: 'ph-arrow-fat-up',
   fix_attempt: 'ph-wrench', page_resolved: 'ph-bell-slash', slo_burn_started: 'ph-gauge' }
@@ -87,6 +87,40 @@ function IncidentRow({ i, onAsk, onChanged }) {
 const SEV_T = { critical: 'crit', high: 'crit', sev1: 'crit', warning: 'warn', medium: 'warn', sev2: 'warn', low: 'neutral', info: 'neutral' }
 const SLO_T = { healthy: 'ok', ok: 'ok', warning: 'warn', at_risk: 'warn', critical: 'crit', exhausted: 'crit', breached: 'crit' }
 
+const SLO_EMPTY = { name: '', service: '', namespace: 'default', target_pct: '99.9', window_days: '30' }
+
+function NewSlo({ onCreated, onCancel }) {
+  const [f, setF] = useState(SLO_EMPTY)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const set = (k, v) => setF(x => ({ ...x, [k]: v }))
+  const t = parseFloat(f.target_pct), w = parseInt(f.window_days, 10)
+  const budget = t > 0 && t < 100 && w > 0 ? (w * 24 * 60 * (1 - t / 100)) : null
+  const submit = async e => {
+    e.preventDefault(); setBusy(true); setMsg(null)
+    try { await postJSON('/api/slos', { ...f, target_pct: t, window_days: w }); onCreated() } catch (err) { setMsg({ ok: false, text: err.message }) }
+    setBusy(false)
+  }
+  return (
+    <form onSubmit={submit} className="surface" style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 16 }}>
+      <div style={{ fontSize: 13.5, fontWeight: 500 }}>New SLO</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', gap: 10 }}>
+        <Field id="slo-name" label="Name"><input id="slo-name" className="input" required placeholder="API availability" value={f.name} onChange={e => set('name', e.target.value)} /></Field>
+        <Field id="slo-svc" label="Deployment" hint="its incidents burn the budget"><input id="slo-svc" className="input mono" required placeholder="api" value={f.service} onChange={e => set('service', e.target.value.trim())} /></Field>
+        <Field id="slo-ns" label="Namespace"><input id="slo-ns" className="input mono" required value={f.namespace} onChange={e => set('namespace', e.target.value.trim())} /></Field>
+        <Field id="slo-t" label="Uptime target %"><input id="slo-t" className="input mono" type="number" step="0.01" min="50" max="99.999" required value={f.target_pct} onChange={e => set('target_pct', e.target.value)} /></Field>
+        <Field id="slo-w" label="Window (days)"><input id="slo-w" className="input mono" type="number" min="1" max="90" required value={f.window_days} onChange={e => set('window_days', e.target.value)} /></Field>
+      </div>
+      {budget != null && <div className="muted" style={{ fontSize: 12 }}>That allows <b>{budget < 120 ? `${budget.toFixed(1)} minutes` : `${(budget / 60).toFixed(1)} hours`}</b> of downtime per {w} days. Under 20% left, risky deploys of {f.service || 'this service'} are blocked automatically.</div>}
+      <Msg msg={msg} />
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button className="btn btn-primary" type="submit" disabled={busy}><Icon name="ph-plus" />{busy ? 'Creating…' : 'Create SLO'}</button>
+        <button className="btn btn-ghost" type="button" onClick={onCancel}>Cancel</button>
+      </div>
+    </form>
+  )
+}
+
 function since(ts) {
   const ms = Date.now() - Date.parse(ts)
   if (Number.isNaN(ms)) return '—'
@@ -95,6 +129,13 @@ function since(ts) {
 }
 
 export default function Incidents({ incidents, slos, onAsk, onChanged }) {
+  const demo = useDemo()
+  const [adding, setAdding] = useState(false)
+  const [sloMsg, setSloMsg] = useState(null)
+  const removeSlo = async s => {
+    setSloMsg(null)
+    try { await delJSON(`/api/slos/${s.id}`); setSloMsg({ ok: true, text: `Deleted ${s.name}.` }); onChanged() } catch (e) { setSloMsg({ ok: false, text: e.message }) }
+  }
   const open = incidents.data?.filter(i => i.status === 'open') || []
   const closed = incidents.data?.filter(i => i.status !== 'open') || []
   const sloList = Array.isArray(slos.data) ? slos.data : []
@@ -131,10 +172,14 @@ export default function Incidents({ incidents, slos, onAsk, onChanged }) {
       )}
 
       <Section>
-        <SectionHead title="SLOs · error budget remaining" />
+        <SectionHead title="SLOs · error budget remaining">
+          {!adding && <button className="btn btn-secondary" style={{ fontSize: 12 }} onClick={() => setAdding(true)} disabled={demo}><Icon name="ph-plus" />New SLO</button>}
+        </SectionHead>
+        {adding && <NewSlo onCancel={() => setAdding(false)} onCreated={() => { setAdding(false); setSloMsg({ ok: true, text: 'SLO created — incidents for that deployment now burn its budget.' }); onChanged() }} />}
+        <Msg msg={sloMsg} />
         {!slos.data && slos.loading && <SkeletonRows rows={2} />}
         {(slos.error || slos.data?.error) && <NoData note="The SLO store couldn't be read." error={slos.error || slos.data?.error} />}
-        {slos.data && !slos.data.error && sloList.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No SLOs defined. Create one with <code>agent slo create</code>.</div>}
+        {slos.data && !slos.data.error && sloList.length === 0 && !adding && <div className="muted" style={{ fontSize: 12.5 }}>No SLOs yet. An SLO turns "is it up enough?" into a budget: each incident spends some, and when it runs low AtlasOS blocks risky deploys. <a href="#incidents" onClick={e => { e.preventDefault(); setAdding(true) }}>Create one</a>.</div>}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 10 }}>
           {sloList.map(s => {
             const x = tone(SLO_T[s.status] || (s.budget_pct >= 50 ? 'ok' : s.budget_pct >= 20 ? 'warn' : 'crit'))
@@ -154,7 +199,10 @@ export default function Incidents({ incidents, slos, onAsk, onChanged }) {
                 <div style={{ height: 6, borderRadius: 3, background: 'color-mix(in srgb, var(--color-text) 9%, transparent)', overflow: 'hidden' }}>
                   <div style={{ height: '100%', width: `${Math.max(0, Math.min(100, s.budget_pct))}%`, background: x.c, borderRadius: 3 }} />
                 </div>
-                <div className="muted" style={{ fontSize: 11.5 }}>{s.used_minutes} of {s.budget_minutes} min used</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span className="muted" style={{ fontSize: 11.5, flex: 1 }}>{s.used_minutes} of {s.budget_minutes} min used</span>
+                  <ConfirmButton danger icon="ph-trash" confirmLabel="Delete?" disabled={demo} onConfirm={() => removeSlo(s)} style={{ fontSize: 11, padding: '1px 6px' }}>Delete</ConfirmButton>
+                </div>
               </div>
             )
           })}

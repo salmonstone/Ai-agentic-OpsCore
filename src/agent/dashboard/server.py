@@ -561,6 +561,7 @@ def api_daemon_start() -> JSONResponse:
         tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-8:])
         return JSONResponse({"status": "error", "error": f"daemon exited during startup (code {proc.returncode}): {tail}"})
     Path("data/daemon.pid").write_text(str(proc.pid))
+    audit.record(f"Dashboard: healing daemon started (pid {proc.pid})")
     return JSONResponse({"status": "started", "pid": proc.pid})
 
 @app.post("/api/daemon/stop")
@@ -572,6 +573,7 @@ def api_daemon_stop() -> JSONResponse:
         import psutil
         psutil.Process(pid).terminate()
         Path("data/daemon.pid").unlink(missing_ok=True)
+        audit.record(f"Dashboard: healing daemon stopped (pid {pid}) — auto-healing paused")
         return JSONResponse({"status": "stopped", "pid": pid})
     except Exception as exc:
         return JSONResponse({"status": "error", "error": str(exc)})
@@ -601,10 +603,10 @@ def api_slos() -> JSONResponse:
     `slos` table stores no precomputed downtime — burn is summed from
     `slo_burns` — so we must not SELECT a `used_downtime_min` column.
     """
-    if not Path("data/slo.db").exists():
+    from agent.integrations import slo_db
+    if not Path(slo_db._DB_PATH).exists():
         return JSONResponse([])
     try:
-        from agent.integrations import slo_db
         result = []
         for s in slo_db.list_slos(active_only=True):
             b = slo_db.get_budget_status(s["id"])
@@ -839,6 +841,7 @@ def api_cluster_switch(req: SwitchClusterRequest) -> JSONResponse:
         _k._avail_cache.update({"ok": None, "ts": 0.0})
     except Exception:
         pass
+    audit.record(f"Dashboard: switched kube context to {req.name}")
     return JSONResponse({"status": "switched", "current": get_current_context()})
 
 
@@ -1110,6 +1113,8 @@ def api_settings_save(req: SettingsSave) -> JSONResponse:
     except settings_store.SettingsError as exc:
         return JSONResponse({"detail": str(exc)}, status_code=400)
     _summary_cache["data"] = None          # tiles should reflect the new connections
+    audit.record("Dashboard: settings changed — " + ", ".join(
+        [f"set {k}" for k in req.values] + [f"removed {k}" for k in req.clear]))
     return JSONResponse({"saved": True, "notes": notes,
                          "restart_note": "Applied to the dashboard now. The daemon and MCP server "
                                          "pick it up the next time they restart."})
@@ -1152,6 +1157,7 @@ def api_settings_protect(request: Request) -> JSONResponse:
     os.environ["DASHBOARD_TOKEN"] = token
     from agent.dashboard import security
     security._kc_cache["at"] = 0.0          # re-read the keychain on the next request
+    audit.record("Dashboard: login turned on (DASHBOARD_TOKEN created)")
     resp = JSONResponse({"protected": True, "token": token})
     resp.set_cookie(COOKIE, token, httponly=True, samesite="strict",
                     secure=request.url.scheme == "https", max_age=30 * 86400, path="/")
@@ -1322,6 +1328,7 @@ def api_incident_ack(incident_id: str) -> JSONResponse:
     from agent.skills.incident import acknowledge_incident
     if not acknowledge_incident(incident_id, who="dashboard"):
         raise HTTPException(409, "Incident not found or already resolved")
+    audit.record(f"Dashboard: acknowledged incident {incident_id}")
     return JSONResponse({"acknowledged": True})
 
 @app.post("/api/incidents/{incident_id}/resolve")
@@ -1336,6 +1343,7 @@ def api_incident_resolve(incident_id: str, req: ResolveIncident) -> JSONResponse
     if inc.get("status") == "resolved":
         return JSONResponse({"resolved": True, "already": True})
     resolve_incident(incident_id, cause=(req.note.strip() or "resolved from the dashboard")[:500], auto_fixed=False)
+    audit.record(f"Dashboard: resolved incident {incident_id} ({inc.get('title', '')})", note=req.note.strip())
     return JSONResponse({"resolved": True})
 
 
@@ -1387,6 +1395,7 @@ async def api_system_backup() -> JSONResponse:
         info = await asyncio.get_event_loop().run_in_executor(None, bk.create_backup)
     except Exception as exc:
         return JSONResponse({"detail": f"Backup failed: {exc}"}, status_code=500)
+    audit.record(f"Dashboard: backup {info.name} created")
     return JSONResponse({"name": info.name, "size": info.size, "created": info.created.isoformat()})
 
 class BackupName(BaseModel):
@@ -1411,7 +1420,591 @@ def api_system_event_retry(event_id: str) -> JSONResponse:
     from agent.integrations import event_queue as eq
     if not eq.retry_dead(event_id):
         raise HTTPException(404, "Not a dead event")
+    audit.record(f"Dashboard: re-queued dead event {event_id}")
     return JSONResponse({"requeued": True})
+
+
+# ── everything-in-one-place: helpers ──────────────────────────────────────────
+# The endpoints below give the dashboard what used to need the CLI. Each one
+# calls the same skill/integration function as its `agent ...` command, and
+# every change is written to the audit trail (dashboard/audit.py).
+import re as _re
+
+from agent.dashboard import audit
+
+_K8S_NAME = _re.compile(r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")
+_REPO = _re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+_BRANCH = _re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+_IMAGE = _re.compile(r"^[A-Za-z0-9._/:@-]{0,300}$")
+_HHMM = _re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_DOMAIN = _re.compile(r"^(?=.{1,253}$)([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_EMAIL = _re.compile(r"^[^@\s]{1,64}@[^@\s]{1,253}\.[a-zA-Z]{2,63}$")
+# Runbook values end up inside a kubectl command that is split on spaces, so
+# only plain names are accepted — anything else could add kubectl arguments.
+_RB_VALUE = _re.compile(r"^[A-Za-z0-9._:/@-]{1,253}$")
+
+
+def _bad(detail: str, code: int = 400) -> JSONResponse:
+    return JSONResponse({"detail": detail}, status_code=code)
+
+
+def _jsonable(x: Any) -> Any:
+    """Skill results mix dicts with dataclasses, pydantic models and datetimes."""
+    import dataclasses
+
+    def _default(o: Any) -> Any:
+        if dataclasses.is_dataclass(o) and not isinstance(o, type):
+            return dataclasses.asdict(o)
+        if hasattr(o, "model_dump"):
+            return o.model_dump(mode="json")
+        if isinstance(o, datetime):
+            return o.isoformat()
+        if hasattr(o, "__dict__"):
+            return {k: v for k, v in vars(o).items() if not k.startswith("_")}
+        return str(o)
+    return json.loads(json.dumps(x, default=_default))
+
+
+async def _in_thread(fn, *args, timeout: float | None = None):
+    fut = asyncio.get_event_loop().run_in_executor(None, fn, *args)
+    return await (asyncio.wait_for(fut, timeout) if timeout else fut)
+
+
+# ── 1. setup checklist ────────────────────────────────────────────────────────
+@app.get("/api/setup")
+def api_setup() -> JSONResponse:
+    """What's connected so far, as a first-run checklist. Only reads local
+    state (settings, files, pid) — the cluster step is added by the browser
+    from the live socket, which already knows whether the API server answers."""
+    from agent.core import settings_store
+    from agent.integrations.mapping_loader import get_loader
+
+    fields = {f["name"]: f for i in settings_store.describe()["integrations"] for f in i["fields"]}
+    is_set = lambda *names: any(fields.get(n, {}).get("set") for n in names)   # noqa: E731
+    try:
+        mappings = len(get_loader().load().mappings)
+    except Exception:
+        mappings = 0
+    try:
+        from agent.integrations import slo_db
+        slos = len(slo_db.list_slos(active_only=True)) if Path(slo_db._DB_PATH).exists() else 0
+    except Exception:
+        slos = 0
+    aws_cfg = is_set("AWS_PROFILE", "AWS_ACCESS_KEY_ID") or (Path.home() / ".aws" / "credentials").exists() \
+        or (Path.home() / ".aws" / "config").exists()
+
+    steps = [
+        {"id": "protect", "title": "Protect the dashboard with a login", "done": bool(expected_token()),
+         "go": "settings", "hint": "Anyone who can open this page could otherwise change your systems."},
+        {"id": "claude", "title": "Connect Claude (AI)", "done": is_set("ANTHROPIC_API_KEY"), "go": "settings",
+         "hint": "Powers diagnoses and the assistant."},
+        {"id": "slack", "title": "Connect Slack", "done": is_set("SLACK_WEBHOOK_URL"), "go": "settings",
+         "hint": "Alerts, approvals and the daily summary."},
+        {"id": "ci", "title": "Connect Jenkins or GitHub Actions", "done": is_set("JENKINS_URL", "GITHUB_TOKEN"),
+         "go": "settings", "hint": "Build failures get diagnosed and, where safe, fixed."},
+        {"id": "aws", "title": "Connect AWS", "done": bool(aws_cfg), "go": "settings", "optional": True,
+         "hint": "Spend, idle resources and database health."},
+        {"id": "webhook", "title": "Set up deploys from GitHub pushes", "done": bool(is_set("GITHUB_WEBHOOK_SECRET") and mappings),
+         "go": "deploys", "optional": True, "hint": "A push becomes a risk-checked deploy waiting for your approval."},
+        {"id": "slo", "title": "Define an SLO", "done": slos > 0, "go": "incidents", "optional": True,
+         "hint": "Incidents burn an error budget; an empty budget blocks risky deploys."},
+        {"id": "daemon", "title": "Start the healing daemon", "done": _daemon_running(), "go": "system",
+         "hint": "Watches the cluster around the clock and fixes what it safely can."},
+    ]
+    return JSONResponse({"steps": steps})
+
+
+# ── 3. SLOs: create / delete ──────────────────────────────────────────────────
+class SloCreate(BaseModel):
+    name: str
+    service: str
+    namespace: str = "default"
+    target_pct: float = 99.9
+    window_days: int = 30
+
+@app.post("/api/slos")
+def api_slo_create(req: SloCreate) -> JSONResponse:
+    """Same call as `agent slo create`."""
+    from agent.integrations import slo_db
+    name = req.name.strip()
+    if not name or len(name) > 120:
+        return _bad("Give the SLO a name (up to 120 characters).")
+    if not _K8S_NAME.match(req.service) or not _K8S_NAME.match(req.namespace):
+        return _bad("Service and namespace must be Kubernetes names (lowercase letters, digits, '-').")
+    if not 50 <= req.target_pct < 100:
+        return _bad("Target must be between 50 and 99.999 %.")
+    if not 1 <= req.window_days <= 90:
+        return _bad("Window must be 1–90 days.")
+    if slo_db.get_slo_by_service(req.service, req.namespace):
+        return _bad(f"{req.service}/{req.namespace} already has an SLO — delete it first.", 409)
+    slo_id = slo_db.create_slo(name, req.service, req.namespace, target_pct=req.target_pct, window_days=req.window_days)
+    audit.record(f"Dashboard: created SLO '{name}' for {req.service}/{req.namespace} "
+                 f"({req.target_pct}% over {req.window_days}d)", slo_id=slo_id)
+    return JSONResponse({"id": slo_id})
+
+@app.delete("/api/slos/{slo_id}")
+def api_slo_delete(slo_id: str) -> JSONResponse:
+    from agent.integrations import slo_db
+    slo = slo_db.get_slo(slo_id)
+    if not slo or not slo_db.delete_slo(slo_id):
+        raise HTTPException(404, "No such SLO")
+    audit.record(f"Dashboard: deleted SLO '{slo['name']}' ({slo['service']}/{slo['namespace']})", slo_id=slo_id)
+    return JSONResponse({"deleted": True})
+
+
+# ── 4. rotate the dashboard token ─────────────────────────────────────────────
+@app.post("/api/settings/rotate-token")
+def api_settings_rotate_token(request: Request) -> JSONResponse:
+    """Replace DASHBOARD_TOKEN. Only reachable while logged in (the guard
+    checks the current token first). Every other browser is logged out; this
+    one gets the new cookie, and the new token is shown once."""
+    if not expected_token():
+        return _bad("This dashboard has no login yet — use Protect instead.", 409)
+    from agent.core import secrets as sec
+    token = sec.generate_token()
+    try:
+        sec.store("DASHBOARD_TOKEN", token)
+    except sec.SecretsError as exc:
+        return _bad(f"Couldn't store the new token: {exc}", 500)
+    os.environ["DASHBOARD_TOKEN"] = token
+    from agent.dashboard import security
+    security._kc_cache["at"] = 0.0
+    audit.record("Dashboard: login token rotated (other sessions logged out)")
+    resp = JSONResponse({"rotated": True, "token": token})
+    resp.set_cookie(COOKIE, token, httponly=True, samesite="strict",
+                    secure=request.url.scheme == "https", max_age=30 * 86400, path="/")
+    return resp
+
+
+# ── 2. deploys from GitHub pushes (webhook + mappings) ────────────────────────
+class MappingIn(BaseModel):
+    repo: str
+    branch: str = "main"
+    deployment: str
+    namespace: str = "default"
+    image_prefix: str = ""
+    auto_approve_low_risk: bool = False
+
+@app.get("/api/deploys/setup")
+def api_deploys_setup() -> JSONResponse:
+    from agent.core import settings_store
+    from agent.core import supervisor as sv
+    from agent.integrations.mapping_loader import get_loader
+    fields = {f["name"]: f for i in settings_store.describe()["integrations"] for f in i["fields"]}
+    secret = fields.get("GITHUB_WEBHOOK_SECRET", {})
+    try:
+        mappings = [m.model_dump() for m in get_loader().load().mappings]
+        err = None
+    except Exception as exc:
+        mappings, err = [], str(exc)[:300]
+    history = _query("data/deploy.db",
+        "SELECT id, repo, branch, deployment, namespace, new_image, risk_label, status, created_at "
+        "FROM pending_deploys ORDER BY created_at DESC LIMIT 15")
+    return JSONResponse({
+        "secret_set": bool(secret.get("set")), "secret_where": secret.get("where"),
+        "protected": bool(expected_token()),
+        "urls": [f"https://{h}/webhook/github" for h in sv.ngrok_hosts()],
+        "local_url": f"http://127.0.0.1:{sv.MCP_PORT}/webhook/github",
+        "mappings": mappings, "error": err, "history": history,
+    })
+
+class SecretReq(BaseModel):
+    replace: bool = False
+
+@app.post("/api/deploys/secret")
+def api_deploys_secret(req: SecretReq) -> JSONResponse:
+    """Generate GITHUB_WEBHOOK_SECRET into the keychain (via settings_store,
+    the Settings page's path) and show it once, to paste into GitHub."""
+    from agent.core import settings_store
+    from agent.core import secrets as sec
+    if not expected_token():
+        return _bad("Protect the dashboard first — a webhook secret is a credential.", 403)
+    fields = {f["name"]: f for i in settings_store.describe()["integrations"] for f in i["fields"]}
+    if fields.get("GITHUB_WEBHOOK_SECRET", {}).get("set") and not req.replace:
+        return _bad("A webhook secret is already set. Replace it only if you'll update GitHub too.", 409)
+    value = sec.generate_token()
+    try:
+        settings_store.save({"GITHUB_WEBHOOK_SECRET": value})
+    except settings_store.SettingsError as exc:
+        return _bad(str(exc))
+    audit.record(f"Dashboard: GitHub webhook secret {'replaced' if req.replace else 'created'}")
+    return JSONResponse({"secret": value,
+                         "note": "Restart AtlasOS's MCP server (it serves the webhook) so it uses the new secret."})
+
+@app.post("/api/deploys/mappings")
+async def api_deploys_add_mapping(req: MappingIn) -> JSONResponse:
+    """Same as `agent deploy add-mapping`: validate against the cluster, then
+    save even if validation only produced warnings (the CLI asks; we report)."""
+    from agent.core.models import WebhookMapping
+    from agent.integrations.mapping_loader import get_loader
+    if not _REPO.match(req.repo):
+        return _bad("Repo must be owner/name, e.g. salmonstone/infragpt.")
+    if not _BRANCH.match(req.branch):
+        return _bad("That branch name isn't valid.")
+    if not _K8S_NAME.match(req.deployment) or not _K8S_NAME.match(req.namespace):
+        return _bad("Deployment and namespace must be Kubernetes names.")
+    if not _IMAGE.match(req.image_prefix):
+        return _bad("Image prefix may only contain registry/path characters.")
+    mapping = WebhookMapping(**req.model_dump())
+    loader = get_loader()
+    try:
+        result = await _in_thread(loader.validate_mapping, mapping, timeout=20)
+        warnings = [] if result.valid else list(result.errors)
+    except asyncio.TimeoutError:
+        warnings = ["Couldn't validate against the cluster (no answer in 20s) — saved anyway."]
+    except Exception as exc:
+        warnings = [f"Couldn't validate against the cluster: {str(exc)[:200]}"]
+    loader.add_mapping(mapping)
+    audit.record(f"Dashboard: deploy mapping {req.repo}:{req.branch} -> {req.deployment}/{req.namespace}",
+                 auto_approve_low_risk=req.auto_approve_low_risk)
+    return JSONResponse({"saved": True, "warnings": warnings})
+
+@app.delete("/api/deploys/mappings")
+def api_deploys_remove_mapping(repo: str, branch: str = "main") -> JSONResponse:
+    from agent.integrations.mapping_loader import get_loader
+    if not get_loader().remove_mapping(repo, branch):
+        raise HTTPException(404, "No such mapping")
+    audit.record(f"Dashboard: removed deploy mapping {repo}:{branch}")
+    return JSONResponse({"removed": True})
+
+
+# ── 5. runbooks ───────────────────────────────────────────────────────────────
+def _runbook_vars(rb: dict) -> list[str]:
+    found: list[str] = []
+    for step in rb.get("steps", []):
+        texts = [str(step.get(k, "")) for k in ("command", "message")] + [str(v) for v in (step.get("args") or {}).values()]
+        for t in texts:
+            for v in _re.findall(r"\{([a-z_]+)\}", t):
+                if v != "runbook_name" and v not in found:
+                    found.append(v)
+    return found
+
+@app.get("/api/runbooks/catalog")
+def api_runbooks_catalog() -> JSONResponse:
+    from agent.integrations import runbook_db
+    from agent.skills import runbook as rbk
+    books = []
+    for rb in rbk._load_runbooks():
+        books.append({
+            "id": rb.get("id", ""), "name": rb.get("name", ""), "description": rb.get("description", ""),
+            "trigger_condition": rb.get("trigger_condition", ""), "vars": _runbook_vars(rb),
+            "steps": [{"name": s.get("name", ""), "type": s.get("type", ""), "on_failure": s.get("on_failure", "escalate"),
+                       "detail": str(s.get("command") or s.get("function") or s.get("message") or "")[:200]}
+                      for s in rb.get("steps", [])],
+        })
+    try:
+        runs = runbook_db.list_runs(limit=20)
+    except Exception:
+        runs = []
+    return JSONResponse({"runbooks": books, "runs": runs, "file": str(rbk._RUNBOOKS_PATH)})
+
+@app.get("/api/runbooks/runs/{run_id}")
+def api_runbook_run_steps(run_id: str) -> JSONResponse:
+    from agent.integrations import runbook_db
+    run = runbook_db.get_run(run_id)
+    if not run:
+        raise HTTPException(404, "No such run")
+    return JSONResponse({"run": run, "steps": runbook_db.get_steps(run_id)})
+
+class RunbookRun(BaseModel):
+    context: dict[str, str] = {}
+
+@app.post("/api/runbooks/{runbook_id}/run")
+async def api_runbook_run(runbook_id: str, req: RunbookRun) -> JSONResponse:
+    """Same call as `agent runbook run`. Only the runbook's own variables are
+    accepted, and only as plain names (see _RB_VALUE)."""
+    from agent.skills import runbook as rbk
+    rb = rbk.get_runbook(runbook_id)
+    if not rb:
+        raise HTTPException(404, "No such runbook")
+    allowed = set(_runbook_vars(rb))
+    ctx: dict[str, str] = {}
+    for k, v in req.context.items():
+        v = v.strip()
+        if not v:
+            continue
+        if k not in allowed:
+            return _bad(f"'{k}' isn't a variable of this runbook.")
+        if not _RB_VALUE.match(v):
+            return _bad(f"'{k}' must be a plain name (letters, digits, . _ : / @ -).")
+        ctx[k] = v
+    ctx.setdefault("namespace", "default")
+    audit.record(f"Dashboard: ran runbook {runbook_id}", context=json.dumps(ctx))
+    result = await _in_thread(lambda: rbk.run_runbook(runbook_id, context=ctx, trigger="dashboard"))
+    return JSONResponse(_jsonable(result))
+
+
+# ── 6. auto-scaling policies ──────────────────────────────────────────────────
+class ScalePolicyIn(BaseModel):
+    deployment: str
+    namespace: str = "default"
+    down_time: str = "17:30"
+    up_time: str = "03:30"
+    down_replicas: int = 1
+    up_replicas: int = 3
+    cpu_pct: float = 80.0
+
+@app.get("/api/scale")
+def api_scale() -> JSONResponse:
+    from agent.integrations import autoscale_db
+    return JSONResponse({"policies": autoscale_db.list_policies(enabled_only=False),
+                         "events": autoscale_db.get_events(limit=20),
+                         "daemon_running": _daemon_running()})
+
+@app.post("/api/scale")
+def api_scale_add(req: ScalePolicyIn) -> JSONResponse:
+    """Same as `agent scale add`. The daemon applies the schedule."""
+    from agent.integrations import autoscale_db
+    if not _K8S_NAME.match(req.deployment) or not _K8S_NAME.match(req.namespace):
+        return _bad("Deployment and namespace must be Kubernetes names.")
+    if not _HHMM.match(req.down_time) or not _HHMM.match(req.up_time):
+        return _bad("Times are HH:MM in UTC, e.g. 17:30.")
+    if not (0 <= req.down_replicas <= 50 and 1 <= req.up_replicas <= 50):
+        return _bad("Replicas: down 0–50, up 1–50.")
+    if not 10 <= req.cpu_pct <= 100:
+        return _bad("CPU threshold must be 10–100 %.")
+    pid = autoscale_db.add_policy(deployment=req.deployment, namespace=req.namespace, name=f"{req.deployment}-policy",
+                                  min_r=1, max_r=max(10, req.up_replicas), down_utc=req.down_time, up_utc=req.up_time,
+                                  down_r=req.down_replicas, up_r=req.up_replicas, cpu_pct=req.cpu_pct)
+    audit.record(f"Dashboard: scaling policy for {req.deployment}/{req.namespace} — down {req.down_time} UTC "
+                 f"to {req.down_replicas}, up {req.up_time} UTC to {req.up_replicas}", policy_id=pid)
+    return JSONResponse({"id": pid})
+
+@app.post("/api/scale/{policy_id}/{action}")
+def api_scale_toggle(policy_id: str, action: str) -> JSONResponse:
+    from agent.integrations import autoscale_db
+    pol = autoscale_db.get_policy(policy_id)
+    if not pol:
+        raise HTTPException(404, "No such policy")
+    if action == "enable":
+        autoscale_db.enable_policy(policy_id)
+    elif action == "disable":
+        autoscale_db.disable_policy(policy_id)
+    else:
+        raise HTTPException(404, "Unknown action")
+    audit.record(f"Dashboard: {action}d scaling policy for {pol['deployment']}/{pol['namespace']}", policy_id=policy_id)
+    return JSONResponse({"enabled": action == "enable"})
+
+
+# ── 7. domains & HTTPS ────────────────────────────────────────────────────────
+@app.get("/api/domains")
+async def api_domains(domain: str = "") -> JSONResponse:
+    """Every Ingress domain checked end to end (LB → DNS → TLS → HTTP → pods),
+    the same check as `agent domain live`. Read-only."""
+    from agent.integrations.kubectl import is_cluster_available
+    domain = domain.strip().lower()
+    if domain and not _DOMAIN.match(domain):
+        return _bad("That isn't a valid domain name.")
+    if not await _in_thread(is_cluster_available):
+        return JSONResponse({"reachable": False, "results": []})
+    from agent.skills.domain import DomainSkill
+    try:
+        results = await _in_thread(lambda: DomainSkill().live(domain or None), timeout=120)
+    except asyncio.TimeoutError:
+        return JSONResponse({"reachable": True, "results": [], "error": "The check took over 2 minutes."})
+    return JSONResponse({"reachable": True, "results": _jsonable(results)})
+
+class EncryptReq(BaseModel):
+    domain: str
+    email: str
+    namespace: str = "default"
+    ingress: str = ""
+    staging: bool = False
+
+@app.post("/api/domains/encrypt")
+async def api_domains_encrypt(req: EncryptReq) -> JSONResponse:
+    """Same as `agent domain encrypt`: ClusterIssuer, Certificate, ingress TLS."""
+    from agent.integrations.kubectl import is_cluster_available
+    domain = req.domain.strip().lower()
+    if not _DOMAIN.match(domain):
+        return _bad("That isn't a valid domain name.")
+    if not _EMAIL.match(req.email.strip()):
+        return _bad("Let's Encrypt needs a valid email for expiry notices.")
+    if not _K8S_NAME.match(req.namespace) or (req.ingress and not _K8S_NAME.match(req.ingress)):
+        return _bad("Namespace and ingress must be Kubernetes names.")
+    if not await _in_thread(is_cluster_available):
+        return _bad("The cluster isn't reachable.", 503)
+    from agent.skills.domain import DomainSkill
+    audit.record(f"Dashboard: requested Let's Encrypt certificate for {domain} "
+                 f"({'staging' if req.staging else 'production'}) in {req.namespace}")
+    result = await _in_thread(lambda: DomainSkill().encrypt(domain=domain, email=req.email.strip(), namespace=req.namespace,
+                                                            ingress=req.ingress or None, staging=req.staging))
+    return JSONResponse(_jsonable(result))
+
+
+# ── 8. databases (RDS / Aurora) ───────────────────────────────────────────────
+_DB_TTL_S = 600
+_db_cache: dict = {"at": 0.0, "data": None}
+
+@app.get("/api/databases")
+async def api_databases(force: bool = False) -> JSONResponse:
+    """Same scan as `agent db scan` (it opens an incident for a critical
+    finding, like the CLI). Identity first, so "couldn't check" never looks
+    like "no databases". Cached 10 min — it's many CloudWatch calls."""
+    import time as _time
+    if not force and _db_cache["data"] is not None and _time.time() - _db_cache["at"] < _DB_TTL_S:
+        return JSONResponse(_db_cache["data"])
+
+    def _build():
+        from agent.config import settings
+        from agent.integrations.aws import friendly_aws_error, get_aws_client
+        region = settings.aws_region
+        try:
+            get_aws_client("sts").get_caller_identity()
+        except Exception as exc:
+            return {"reachable": False, "region": region, "error": friendly_aws_error(exc)}
+        from agent.skills.db_health import scan_all_databases
+        try:
+            results = scan_all_databases(region)
+        except Exception as exc:
+            return {"reachable": True, "region": region, "databases": [], "error": str(exc)[:300]}
+        return {"reachable": True, "region": region, "databases": _jsonable(results),
+                "generated_at": datetime.now(timezone.utc).isoformat()}
+
+    data = await _in_thread(_build)
+    if data.get("reachable") and not data.get("error"):
+        _db_cache.update(data=data, at=_time.time())
+    return JSONResponse(data)
+
+
+# ── 9. daily summary: send now, schedule, history ─────────────────────────────
+_SUMMARY_TASK = "AtlasOS Daily Summary"
+
+def _scheduled_task(name: str) -> dict:
+    if sys.platform != "win32":
+        return {"available": False, "detail": "Scheduling is shown on Windows only."}
+    try:
+        out = subprocess.run(["schtasks", "/Query", "/TN", name, "/FO", "LIST", "/V"], capture_output=True,
+                             text=True, timeout=8, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as exc:
+        return {"available": False, "detail": str(exc)[:200]}
+    if out.returncode != 0:
+        return {"available": False, "detail": f"No scheduled task named “{name}”."}
+    want = {"Next Run Time": "next_run", "Last Run Time": "last_run", "Last Result": "last_result",
+            "Status": "status", "Start Time": "start_time", "Schedule Type": "schedule"}
+    info: dict = {"available": True, "name": name}
+    for line in out.stdout.splitlines():
+        key, _, val = line.partition(":")
+        if key.strip() in want and want[key.strip()] not in info:
+            info[want[key.strip()]] = val.strip()
+    return info
+
+@app.get("/api/summary/info")
+def api_summary_info() -> JSONResponse:
+    from agent.integrations import notifications
+    from agent.integrations.slack import is_configured
+    history = [n for n in notifications.list_recent(200)["items"] if n.get("kind") == "summary"][:14]
+    return JSONResponse({"schedule": _scheduled_task(_SUMMARY_TASK), "slack": is_configured(), "history": history})
+
+class SummarySend(BaseModel):
+    force: bool = False
+
+@app.post("/api/summary/send")
+async def api_summary_send(req: SummarySend) -> JSONResponse:
+    """Same as `agent summary send` — once a day unless force."""
+    from agent.skills import daily_summary as ds
+    r = await _in_thread(lambda: ds.send(force=req.force))
+    if r.get("sent"):
+        audit.record("Dashboard: daily summary sent to Slack" + (" (again today)" if req.force else ""))
+    return JSONResponse(r)
+
+
+# ── 10. activity: the audit trail ─────────────────────────────────────────────
+# Sources that record something being *done*; everything else is a scan or
+# diagnosis. The Activity page shows these by default.
+_ACTION_SOURCES = ["dashboard", "approvals", "auto-healer", "node-healer", "k8s-fix", "security-fix", "tls-fix",
+                   "cost-aws-fix", "terraform-fix", "deployment", "backup", "secrets", "multi-cluster-add"]
+
+@app.get("/api/activity")
+def api_activity(view: str = "actions", source: str = "", q: str = "", before: str = "", limit: int = 50) -> JSONResponse:
+    from agent.dashboard.security import redact
+    from agent.memory import store
+    sources = [source] if source else (_ACTION_SOURCES if view == "actions" else None)
+    items = store.list_memories(limit=max(1, min(limit, 200)), sources=sources, query=q.strip()[:200], before=before)
+    return JSONResponse({
+        "items": [{"id": m.id, "source": m.source, "created_at": m.created_at.isoformat(),
+                   "content": redact(m.content[:4000]), "truncated": len(m.content) > 4000} for m in items],
+        "sources": store.source_counts(), "action_sources": _ACTION_SOURCES,
+    })
+
+
+# ── 12. search across everything ──────────────────────────────────────────────
+@app.get("/api/search")
+def api_search(q: str) -> JSONResponse:
+    """Ctrl+K search over AtlasOS's own records — local stores and the last
+    AWS snapshot; nothing here calls an external API."""
+    needle = q.strip().lower()
+    if len(needle) < 2:
+        return JSONResponse({"results": []})
+    hit = lambda *parts: any(needle in str(p or "").lower() for p in parts)   # noqa: E731
+    out: list[dict] = []
+
+    def add(kind, icon, title, sub, go):
+        out.append({"kind": kind, "icon": icon, "title": str(title)[:160], "sub": str(sub)[:200], "go": go})
+
+    try:
+        from agent.integrations import incident_db
+        for i in incident_db.list_incidents(limit=200, since_hours=24 * 365):
+            if hit(i.get("id"), i.get("title"), i.get("service"), i.get("namespace")):
+                add("Incident", "ph-siren", i["title"], f"{i.get('status')} · {i.get('service')}/{i.get('namespace')}", "incidents")
+    except Exception:
+        pass
+    try:
+        from agent.integrations import slo_db
+        if Path(slo_db._DB_PATH).exists():
+            for s in slo_db.list_slos(active_only=True):
+                if hit(s.get("name"), s.get("service")):
+                    add("SLO", "ph-gauge", s["name"], f"{s['service']}/{s['namespace']} · {s['target_pct']}%", "incidents")
+    except Exception:
+        pass
+    try:
+        from agent.skills.runbook import list_runbooks
+        for rb in list_runbooks():
+            if hit(rb["id"], rb["name"], rb["description"]):
+                add("Runbook", "ph-book-open", rb["name"], rb["description"], "automation")
+    except Exception:
+        pass
+    try:
+        from agent.integrations import autoscale_db
+        for p in autoscale_db.list_policies(enabled_only=False):
+            if hit(p.get("deployment"), p.get("namespace"), p.get("name")):
+                add("Scaling policy", "ph-arrows-out-line-vertical", p["deployment"], f"{p['namespace']} · down {p.get('schedule_down_utc')} / up {p.get('schedule_up_utc')} UTC", "automation")
+    except Exception:
+        pass
+    try:
+        from agent.integrations.mapping_loader import get_loader
+        for m in get_loader().load().mappings:
+            if hit(m.repo, m.deployment, m.namespace):
+                add("Deploy mapping", "ph-git-branch", f"{m.repo}:{m.branch}", f"→ {m.deployment}/{m.namespace}", "deploys")
+    except Exception:
+        pass
+    inv = ((_aws_cache.get("data") or {}).get("inventory")) or {}
+    for e in inv.get("ec2", []):
+        if hit(e.get("id"), e.get("name"), e.get("private_ip"), e.get("public_ip")):
+            add("EC2", "ph-hard-drives", e.get("name") or e.get("id"), f"{e.get('id')} · {e.get('instance_type')} · {e.get('state')}", "aws")
+    for r in inv.get("rds", []):
+        if hit(r.get("id"), r.get("engine")):
+            add("RDS", "ph-database", r.get("id"), f"{r.get('engine')} · {r.get('status')}", "databases")
+    for lb in inv.get("load_balancers", []):
+        if hit(lb.get("name"), lb.get("dns_name")):
+            add("Load balancer", "ph-arrows-split", lb.get("name"), lb.get("dns_name", ""), "aws")
+    try:
+        from agent.integrations import notifications
+        for n in notifications.list_recent(200)["items"]:
+            if hit(n.get("title"), n.get("message")):
+                add("Notification", "ph-bell", n["title"], n.get("created_at", "")[:16].replace("T", " "), "activity")
+                if sum(1 for o in out if o["kind"] == "Notification") >= 5:
+                    break
+    except Exception:
+        pass
+    try:
+        from agent.memory import store
+        for m in store.list_memories(limit=5, query=needle):
+            add("Activity", "ph-clock-counter-clockwise", m.content.splitlines()[0][:140] if m.content else m.source,
+                f"{m.source} · {m.created_at:%Y-%m-%d %H:%M}", "activity")
+    except Exception:
+        pass
+    return JSONResponse({"results": out[:40]})
 
 
 # ── SPA catch-all (must be last — only when dist/ is present) ─────────────────

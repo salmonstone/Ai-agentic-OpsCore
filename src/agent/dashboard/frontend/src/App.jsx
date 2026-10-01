@@ -14,7 +14,13 @@ import GitHub from './ui/GitHub'
 import Inbox from './ui/Inbox'
 import Login from './ui/Login'
 import LogViewer from './ui/LogViewer'
+import Activity from './ui/Activity'
+import Automation from './ui/Automation'
+import Databases from './ui/Databases'
+import Deploys from './ui/Deploys'
+import Domains from './ui/Domains'
 import Settings from './ui/Settings'
+import SetupChecklist from './ui/SetupChecklist'
 import System from './ui/System'
 import Overview, { QUICK } from './ui/Overview'
 import Palette from './ui/Palette'
@@ -27,6 +33,11 @@ const TITLES = {
   jenkins: ['Jenkins', 'Builds and failures'],
   github: ['GitHub Actions', 'Workflow runs, failures and their logs'],
   aws: ['AWS', 'Spend, and every resource in your region'],
+  databases: ['Databases', 'RDS and Aurora health — CPU, storage, connections, latency'],
+  domains: ['Domains & HTTPS', 'Is every site live? Turn on HTTPS in one step'],
+  deploys: ['Deploys', 'GitHub pushes become risk-checked deploys — set it up here'],
+  automation: ['Automation', 'Runbooks, auto-scaling schedules and the daily summary'],
+  activity: ['Activity', 'Everything AtlasOS and people did — the audit trail'],
   approvals: ['Approvals', 'Fixes waiting for a human — the same queue as Slack'],
   incidents: ['Incidents & SLOs', 'Open incidents and error budgets'],
   commands: ['Command Runner', 'Every agent CLI command, with its options'],
@@ -327,11 +338,17 @@ function Shell() {
             </div>
           )}
 
+          {panel === 'overview' && <SetupChecklist live={live} context={context} onNav={setPanel} />}
           {panel === 'overview' && <Overview summary={summary} actions={actions} chart={chart} spend={spend} live={live} onNav={setPanel} onRun={runQuick} daemonRunning={!!live?.stats?.daemon_running} />}
           {panel === 'cluster' && <ClusterPanel refreshKey={refreshKey} onAsk={ask} onConnected={() => clusters.reload()} onLogs={setLogSource} />}
           {panel === 'jenkins' && <JenkinsPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
           {panel === 'github' && <GitHubPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
           {panel === 'aws' && <AwsPanel refreshKey={refreshKey} onAsk={ask} />}
+          {panel === 'databases' && <Databases key={refreshKey} onAsk={ask} />}
+          {panel === 'domains' && <Domains key={refreshKey} onAsk={ask} />}
+          {panel === 'deploys' && <Deploys key={refreshKey} onNav={setPanel} />}
+          {panel === 'automation' && <Automation key={refreshKey} summary={summary} onLogs={setLogSource} />}
+          {panel === 'activity' && <Activity key={refreshKey} />}
           {panel === 'settings' && <Settings key={refreshKey} live={live} context={context} onNav={setPanel} />}
           {panel === 'system' && <System key={refreshKey} onLogs={setLogSource} onDaemon={() => runQuick({ id: 'daemon' })} />}
           {panel === 'approvals' && <Approvals approvals={approvals} deploys={deploys} onChanged={() => { approvals.reload(); deploys.reload() }} />}

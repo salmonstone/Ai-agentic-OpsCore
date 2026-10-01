@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ago, postJSON } from '../lib/api'
 import { useData, useDemo } from '../lib/demo'
+import { notifyEnabled, notifySupported, onNotifyChange, setNotify, showNotification } from '../lib/notify'
 import { Icon } from './common'
 
 const SEV = {
@@ -19,14 +20,12 @@ function target(n) {
   return null
 }
 
-function loadPref() { try { return localStorage.getItem('atlas-desktop-notify') === '1' } catch { return false } }
-
 export default function Inbox({ onNav, demo }) {
   const demoCtx = useDemo()
   const isDemo = demo ?? demoCtx
   const inbox = useData('notifications', '/api/notifications?limit=60', 15000, isDemo)
   const [open, setOpen] = useState(false)
-  const [desktop, setDesktop] = useState(loadPref)
+  const [desktop, setDesktop] = useState(notifyEnabled)
   const seen = useRef(null)
   const ref = useRef(null)
 
@@ -37,15 +36,17 @@ export default function Inbox({ onNav, demo }) {
   useEffect(() => {
     if (!inbox.data || isDemo) return
     const ids = new Set(items.map(i => i.id))
-    if (seen.current && desktop && 'Notification' in window && Notification.permission === 'granted') {
+    if (seen.current && desktop && notifyEnabled()) {
       for (const n of items) {
-        if (!seen.current.has(n.id) && !n.read && (n.severity === 'critical' || n.severity === 'warning' || n.kind === 'approval')) {
-          try { new Notification(`AtlasOS · ${n.title}`, { body: n.message?.slice(0, 180) || '', tag: n.id }) } catch { /* unsupported */ }
+        if (!seen.current.has(n.id) && !n.read && (n.severity === 'critical' || n.severity === 'warning' || n.kind === 'approval' || n.kind === 'incident')) {
+          showNotification(n.title, n.message, n.id)
         }
       }
     }
     seen.current = ids
   }, [inbox.data]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => onNotifyChange(() => setDesktop(notifyEnabled())), [])
 
   useEffect(() => {
     if (!open) return undefined
@@ -61,12 +62,7 @@ export default function Inbox({ onNav, demo }) {
     const t = target(n)
     if (t) { onNav(t); setOpen(false) }
   }
-  const toggleDesktop = async () => {
-    if (desktop) { setDesktop(false); try { localStorage.setItem('atlas-desktop-notify', '0') } catch { /* */ } return }
-    if (!('Notification' in window)) return
-    const perm = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission()
-    if (perm === 'granted') { setDesktop(true); try { localStorage.setItem('atlas-desktop-notify', '1') } catch { /* */ } }
-  }
+  const toggleDesktop = async () => { await setNotify(!desktop); setDesktop(notifyEnabled()) }
 
   return (
     <div ref={ref} style={{ position: 'relative' }}>
@@ -113,7 +109,7 @@ export default function Inbox({ onNav, demo }) {
             })}
           </div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', fontSize: 12, background: 'var(--rule) no-repeat top / 100% 1px', cursor: 'pointer' }}>
-            <input type="checkbox" id="desktop-notify" checked={desktop} onChange={toggleDesktop} disabled={isDemo || !('Notification' in window)} />
+            <input type="checkbox" id="desktop-notify" checked={desktop} onChange={toggleDesktop} disabled={isDemo || !notifySupported()} />
             Desktop alerts for critical, warning and approval notifications
           </label>
         </div>

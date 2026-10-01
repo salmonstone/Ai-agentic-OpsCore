@@ -6,9 +6,14 @@ export const NAV = [
   { id: 'jenkins', label: 'Jenkins', icon: 'ph-hammer' },
   { id: 'github', label: 'GitHub Actions', icon: 'ph-github-logo' },
   { id: 'aws', label: 'AWS', icon: 'ph-cloud' },
+  { id: 'databases', label: 'Databases', icon: 'ph-database' },
+  { id: 'domains', label: 'Domains & HTTPS', icon: 'ph-globe-hemisphere-west' },
+  { id: 'deploys', label: 'Deploys', icon: 'ph-rocket-launch' },
   { id: 'approvals', label: 'Approvals', icon: 'ph-seal-check' },
   { id: 'incidents', label: 'Incidents & SLOs', icon: 'ph-siren' },
+  { id: 'automation', label: 'Automation', icon: 'ph-robot' },
   { id: 'commands', label: 'Command Runner', icon: 'ph-terminal-window' },
+  { id: 'activity', label: 'Activity', icon: 'ph-clock-counter-clockwise' },
   { id: 'system', label: 'System', icon: 'ph-cpu' },
   { id: 'settings', label: 'Settings', icon: 'ph-gear' },
   { id: 'about', label: 'About', icon: 'ph-info' },
@@ -35,14 +40,14 @@ export default function Sidebar({ panel, onNav, badges, live, context, theme, on
         </div>
       </div>
 
-      <nav style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <nav style={{ display: 'flex', flexDirection: 'column', gap: 1, overflowY: 'auto', minHeight: 0 }}>
         {NAV.map(n => {
           const cur = panel === n.id
           const b = badges[n.id]
           return (
             <button key={n.id} className={cur ? '' : 'navbtn'} onClick={() => onNav(n.id)} aria-current={cur ? 'page' : undefined}
               style={{
-                display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '7px 10px', border: 0,
+                display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '6px 10px', border: 0,
                 borderRadius: 'var(--radius-md)', cursor: 'pointer', textAlign: 'left', fontSize: 13,
                 background: cur ? 'color-mix(in srgb, var(--color-accent) 16%, transparent)' : 'transparent',
                 color: cur ? 'var(--color-text)' : 'color-mix(in srgb, var(--color-text) 80%, transparent)',

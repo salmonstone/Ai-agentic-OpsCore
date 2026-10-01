@@ -22,6 +22,14 @@ export async function postJSON(url, data) {
   return body
 }
 
+export async function delJSON(url) {
+  const r = await fetch(url, { method: 'DELETE' })
+  checkAuth(r)
+  const body = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(body.error || body.detail || `${r.status} ${r.statusText}`)
+  return body
+}
+
 /** Fetch `url` on mount, every `intervalMs` (0 = never), and on reload().
  *  Keeps the last good data while refreshing; `error` is set on failure.
  *  url = null fetches nothing (demo mode supplies the data instead). */

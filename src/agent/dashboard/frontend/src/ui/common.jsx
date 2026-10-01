@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { tone } from '../lib/tone'
 
 export const Icon = ({ name, size, style, className, ...rest }) => (
@@ -80,4 +81,54 @@ export function Bar({ pct, color }) {
 
 export function TableCard({ children }) {
   return <div className="surface" style={{ padding: '2px 8px', overflowX: 'auto' }}>{children}</div>
+}
+
+/** One-line result of an action: { ok, text } or null. */
+export function Msg({ msg }) {
+  if (!msg) return null
+  return (
+    <div role="status" style={{ fontSize: 12.5, color: msg.ok ? 'var(--st-ok)' : 'var(--st-crit)', wordBreak: 'break-word' }}>
+      <Icon name={msg.ok ? 'ph-check-circle' : 'ph-x-circle'} /> {msg.text}
+    </div>
+  )
+}
+
+/** Labelled input. `hint` shows under it. */
+export function Field({ id, label, hint, children }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
+      <label htmlFor={id} className="muted" style={{ fontSize: 11.5 }}>{label}</label>
+      {children}
+      {hint && <span className="muted" style={{ fontSize: 11 }}>{hint}</span>}
+    </div>
+  )
+}
+
+export function CopyButton({ text, label = 'Copy' }) {
+  const [done, setDone] = useState(false)
+  const copy = async () => { try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 1500) } catch { /* blocked */ } }
+  return <button type="button" className="btn btn-secondary" onClick={copy} style={{ fontSize: 12 }}><Icon name={done ? 'ph-check' : 'ph-copy'} />{done ? 'Copied' : label}</button>
+}
+
+/** A button that changes real things: the first click arms it, the second
+ *  (within 5s) runs it. */
+export function ConfirmButton({ onConfirm, children, confirmLabel = 'Click again to confirm', danger, disabled, busy, icon, style }) {
+  const [armed, setArmed] = useState(false)
+  useEffect(() => { if (!armed) return undefined; const t = setTimeout(() => setArmed(false), 5000); return () => clearTimeout(t) }, [armed])
+  const click = () => { if (armed) { setArmed(false); onConfirm() } else setArmed(true) }
+  return (
+    <button type="button" className={`btn ${danger || armed ? 'btn-danger' : 'btn-primary'}`} onClick={click} disabled={disabled || busy} style={style}>
+      <Icon name={busy ? 'ph-circle-notch' : armed ? 'ph-warning' : (icon || 'ph-play')} className={busy ? 'spin' : undefined} />
+      {busy ? 'Working…' : armed ? confirmLabel : children}
+    </button>
+  )
+}
+
+/** Card with a heading row. */
+export function Card({ children, style, warn }) {
+  return (
+    <div className="surface" style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 16, minWidth: 0, ...(warn ? { border: '1px solid color-mix(in srgb, var(--st-warn) 45%, transparent)' } : {}), ...style }}>
+      {children}
+    </div>
+  )
 }
