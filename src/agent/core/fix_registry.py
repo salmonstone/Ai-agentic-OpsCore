@@ -76,6 +76,47 @@ async def execute(kind: str, params: dict, confirm: bool) -> dict:
     return await fn(**params, confirm=confirm)
 
 
+async def decide(action_id: str, approve: bool, user: str) -> dict:
+    """Approve (and run) or reject one pending action — the dashboard's
+    Approve/Reject buttons. Same steps, same order as the Slack button
+    (integrations/webhook.py _handle_fix_action): refuse anything that isn't
+    still pending or has expired, record the decision, run the fix through
+    execute() with confirm=True, record the outcome, remember() it.
+
+    Returns {"status": <final status>, "message": str, "result": dict | None}.
+    """
+    from agent.core import approvals
+    from agent.memory.retrieval import remember
+
+    pending = approvals.get(action_id)
+    if pending is None:
+        return {"status": "not_found", "message": "No such pending action — it may be old.", "result": None}
+    if pending.status != "pending":
+        return {"status": pending.status, "message": f"Already {pending.status} — no action taken.",
+                "result": pending.result}
+    if approvals.is_expired(pending):
+        approvals.decide(pending.id, "expired", user)
+        return {"status": "expired", "message": "This proposal expired before anyone approved it.", "result": None}
+
+    meta = {"kind": pending.kind, "id": pending.id, "user": user}
+    if not approve:
+        approvals.decide(pending.id, "rejected", user)
+        remember(f"Approval {pending.id} ({pending.kind}) rejected by {user}: {pending.summary}",
+                 source="approvals", metadata=meta)
+        return {"status": "rejected", "message": f"Rejected by {user}.", "result": None}
+
+    approvals.decide(pending.id, "approved", user)
+    try:
+        result = await execute(pending.kind, pending.params, confirm=True)
+    except Exception as exc:
+        result = {"applied": False, "message": f"error: {exc}"}
+    final = "applied" if result.get("applied") else "failed"
+    approvals.decide(pending.id, final, user, result=result)
+    remember(f"Approval {pending.id} ({pending.kind}) approved by {user} -> {final.upper()}: {pending.summary}",
+             source="approvals", metadata={**meta, "result": final.upper()})
+    return {"status": final, "message": str(result.get("message") or ""), "result": result}
+
+
 # ---------------------------------------------------------------------------
 # Proposing — the one validated path shared by `agent approvals propose` and
 # the propose_fix MCP tool. Proposing never changes infrastructure: it writes

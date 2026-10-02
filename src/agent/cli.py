@@ -12594,8 +12594,10 @@ def incident_resolve(
         return
 
     cause = note or "manually resolved"
-    incident_db.resolve_incident(inc["id"], auto_fixed=False, note=cause)
-    incident_db.add_event(inc["id"], "resolved", detail=cause)
+    # Shared path (skills/incident.py): also closes the on-call page and ends
+    # the SLO burn, which this command used to skip.
+    from agent.skills.incident import resolve_incident as _resolve
+    _resolve(inc["id"], cause=cause, auto_fixed=False)
     console.print(f"[green]✅ Incident {inc['id'][:8]} resolved.[/green]")
     console.print()
 
@@ -13677,8 +13679,13 @@ def eval_page() -> None:
 
 _DASHBOARD_PORT  = 8501
 _FRONTEND_PORT   = 5173
-_DASHBOARD_PID   = Path("data/dashboard.pid")
-_FRONTEND_PID    = Path("data/dashboard-frontend.pid")
+# Anchored to the project root, not the current folder, so start/stop/open
+# agree no matter where the command is typed.
+_PROJECT_ROOT    = Path(__file__).resolve().parents[2]
+if not (_PROJECT_ROOT / "pyproject.toml").exists():
+    _PROJECT_ROOT = Path.cwd()
+_DASHBOARD_PID   = _PROJECT_ROOT / "data" / "dashboard.pid"
+_FRONTEND_PID    = _PROJECT_ROOT / "data" / "dashboard-frontend.pid"
 _FRONTEND_DIR    = Path(__file__).parent / "dashboard" / "frontend"
 
 
@@ -13723,19 +13730,35 @@ def dashboard_start(
         _DASHBOARD_PID.unlink(missing_ok=True)
 
     _DASHBOARD_PID.parent.mkdir(parents=True, exist_ok=True)
+    # Run from the project root so the server's data/ stores are the real ones
+    # no matter which folder this command was typed in, and give it a log file:
+    # a detached process with no stdout/stderr dies at startup on Python 3.14
+    # (found live — it printed "running" while the server was already dead).
+    root = _PROJECT_ROOT
+    log_path = root / "data" / "logs" / "dashboard.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_path, "a", encoding="utf-8")
     api_proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn",
          "agent.dashboard.server:app",
          "--host", "127.0.0.1",
          "--port", str(port),
-         "--log-level", "error"],
+         "--log-level", "warning"],
+        cwd=str(root), stdin=subprocess.DEVNULL, stdout=log_file, stderr=log_file,
         creationflags=cflags,
     )
+    log_file.close()
     _DASHBOARD_PID.write_text(str(api_proc.pid))
 
     ui_url = f"http://localhost:{port}"
 
-    import time; time.sleep(2)
+    import time; time.sleep(3)
+    if api_proc.poll() is not None:
+        _DASHBOARD_PID.unlink(missing_ok=True)
+        tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-12:])
+        console.print(f"[red]Dashboard server exited during startup (code {api_proc.returncode}).[/red]")
+        console.print(f"[dim]Last lines of {log_path}:[/dim]\n{tail}")
+        raise typer.Exit(1)
 
     console.print()
     console.print(Panel(
@@ -13965,7 +13988,9 @@ def events_retry(
             raise typer.Exit(1)
         target = matches[0]
 
-    retry_dead(target)
+    if not retry_dead(target):
+        console.print(f"[red]Event {target[:8]} isn't a dead event — nothing requeued.[/red]")
+        raise typer.Exit(1)
     console.print(f"[green]✓ Event {target[:8]} requeued — the worker will pick it up shortly.[/green]")
     console.print()
 

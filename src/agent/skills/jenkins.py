@@ -241,6 +241,15 @@ class JenkinsSkill(BaseSkill):
         log.info("jenkins.scan.start")
 
         all_jobs = jk.get_all_jobs()
+        if not all_jobs:
+            # get_all_jobs() returns [] on any error, so an unreachable Jenkins
+            # used to come back as "0 failing jobs, health 100/100" — found live
+            # when a Wi-Fi captive portal was answering for Jenkins. Raise
+            # instead: every caller (CLI, daemon watch loop, MCP, dashboard)
+            # already reports an exception as "couldn't check".
+            info = jk.get_connection_info()
+            if not info.connected:
+                raise RuntimeError(f"Couldn't reach Jenkins, so nothing was checked: {(info.error or 'no response')[:200]}")
         failed_jobs = [j for j in all_jobs if not j.is_folder and j.is_failing]
         offline_nodes = jk.get_offline_nodes()
         stuck_queue = jk.get_stuck_queue_items()

@@ -233,16 +233,19 @@ def fail(event_id: str, error: str, retry: bool = True) -> None:
 
 
 def retry_dead(event_id: str) -> bool:
-    """Move a dead-letter event back to pending for a manual retry."""
+    """Move a dead-letter event back to pending for a manual retry.
+    Returns False when nothing was re-queued (unknown id, or not dead) — it
+    used to return True regardless, so callers reported no-op retries as done."""
     now = _now()
-    _db().execute(
+    cur = _db().execute(
         f"UPDATE {_TABLE} "
         f"SET status='pending', retry_count=0, error='', scheduled_at=?, updated_at=? "
         f"WHERE id=? AND status='dead'",
         [now, now, event_id],
     )
-    log.info("event_queue.manual_retry", id=event_id)
-    return True
+    requeued = (cur.rowcount or 0) > 0
+    log.info("event_queue.manual_retry", id=event_id, requeued=requeued)
+    return requeued
 
 
 # ---------------------------------------------------------------------------

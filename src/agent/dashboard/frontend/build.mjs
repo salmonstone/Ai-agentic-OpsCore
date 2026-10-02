@@ -8,6 +8,11 @@ const dist = resolve('dist')
 const assets = resolve('dist/assets')
 mkdirSync(assets, { recursive: true })
 
+// Fonts (Inter, JetBrains Mono) and the Phosphor icon font are bundled from
+// node_modules — no CDN at runtime. The server serves dist/assets at /assets.
+const fontLoaders = { '.woff2': 'file', '.woff': 'file', '.ttf': 'file', '.eot': 'file', '.svg': 'file' }
+const assetOpts = { assetNames: '[name]-[hash]', publicPath: '/assets' }
+
 // Bundle JS + JSX
 const result = await build({
   entryPoints: ['src/main.jsx'],
@@ -15,7 +20,8 @@ const result = await build({
   outfile: 'dist/assets/index.js',
   format: 'esm',
   jsx: 'automatic',
-  loader: { '.jsx': 'jsx', '.js': 'js', '.css': 'css' },
+  loader: { '.jsx': 'jsx', '.js': 'js', '.css': 'css', ...fontLoaders },
+  ...assetOpts,
   minify: true,
   sourcemap: false,
   target: ['esnext'],
@@ -30,10 +36,11 @@ await build({
   entryPoints: ['src/index.css'],
   bundle: true,
   outfile: 'dist/assets/index.css',
-  loader: { '.css': 'css' },
+  loader: { '.css': 'css', ...fontLoaders },
+  ...assetOpts,
   minify: true,
   logLevel: 'info',
-}).catch(() => {})
+}).catch(() => process.exit(1))
 
 // Write index.html
 writeFileSync('dist/index.html', `<!DOCTYPE html>

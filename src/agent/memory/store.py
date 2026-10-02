@@ -109,6 +109,41 @@ def get_recent(limit: int = 20) -> list[Memory]:
     return result
 
 
+def list_memories(
+    limit: int = 50,
+    sources: list[str] | None = None,
+    query: str = "",
+    before: str = "",
+) -> list[Memory]:
+    """Newest first, optionally only some sources, containing `query`
+    (case-insensitive), and older than `before` (ISO time, for paging)."""
+    db = _db()
+    clauses, params = [], []
+    if sources:
+        clauses.append(f"source IN ({','.join('?' * len(sources))})")
+        params += sources
+    if query:
+        clauses.append("content LIKE ? ESCAPE '\\'")
+        params.append("%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+    if before:
+        clauses.append("created_at < ?")
+        params.append(before)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = db.execute(
+        f"SELECT * FROM {_TABLE} {where} ORDER BY created_at DESC LIMIT ?",
+        [*params, limit],
+    ).fetchall()
+    cols = [d[1] for d in db.execute(f"PRAGMA table_info({_TABLE})").fetchall()]
+    return [_row_to_memory(dict(zip(cols, r))) for r in rows]
+
+
+def source_counts() -> dict[str, int]:
+    """How many memories each source has."""
+    db = _db()
+    return {s: n for s, n in db.execute(
+        f"SELECT source, COUNT(*) FROM {_TABLE} GROUP BY source ORDER BY COUNT(*) DESC").fetchall()}
+
+
 def get_by_source(source: str) -> list[Memory]:
     """Return all memories from a given source, newest first."""
     db = _db()

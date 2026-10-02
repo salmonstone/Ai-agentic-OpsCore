@@ -1,194 +1,513 @@
-import { useState, useEffect, useCallback } from 'react'
-import Sidebar from './components/Sidebar'
-import LiveClusterPanel from './components/LiveClusterPanel'
-import DaemonControl from './components/DaemonControl'
-import ActivityFeed from './components/ActivityFeed'
-import CommandRunner from './components/CommandRunner'
-import PendingApprovals from './components/PendingApprovals'
-import IncidentsPanel from './components/IncidentsPanel'
-import SLOPanel from './components/SLOPanel'
-import JenkinsPanel from './components/JenkinsPanel'
-import ClustersPanel from './components/ClustersPanel'
-import AboutPanel from './components/AboutPanel'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { getJSON, postJSON, runCommand, usePoll } from './lib/api'
+import { DemoCtx, demoLive, useData } from './lib/demo'
+import About from './ui/About'
+import Approvals from './ui/Approvals'
+import ChatWidget from './ui/ChatWidget'
+import Cluster from './ui/Cluster'
+import Commands from './ui/Commands'
+import { Icon } from './ui/common'
+import Incidents from './ui/Incidents'
+import Jenkins from './ui/Jenkins'
+import Aws from './ui/Aws'
+import GitHub from './ui/GitHub'
+import Inbox from './ui/Inbox'
+import Login from './ui/Login'
+import LogViewer from './ui/LogViewer'
+import Activity from './ui/Activity'
+import Automation from './ui/Automation'
+import Databases from './ui/Databases'
+import Deploys from './ui/Deploys'
+import Domains from './ui/Domains'
+import Settings from './ui/Settings'
+import SetupChecklist from './ui/SetupChecklist'
+import System from './ui/System'
+import Overview, { QUICK } from './ui/Overview'
+import Palette from './ui/Palette'
+import RunDrawer from './ui/RunDrawer'
+import Sidebar, { NAV } from './ui/Sidebar'
 
-export default function App() {
-  const [commandGroups, setCommandGroups] = useState({})
-  const [activeCmd, setActiveCmd]         = useState(null)
-  const [activeSection, setActiveSection] = useState('overview')
-  const [liveData, setLiveData]           = useState(null)
-  const [cmdCount, setCmdCount]           = useState(0)
-  const [aboutOpen, setAboutOpen]         = useState(false)
+const TOPBAR_H = 56
 
+const TITLES = {
+  overview: ['Overview', 'Everything AtlasOS watches, at a glance'],
+  cluster: ['Cluster', 'Nodes, problem pods, and what the daemon healed'],
+  jenkins: ['Jenkins', 'Builds and failures'],
+  github: ['GitHub Actions', 'Workflow runs, failures and their logs'],
+  aws: ['AWS', 'Spend, and every resource in your region'],
+  databases: ['Databases', 'RDS and Aurora health — CPU, storage, connections, latency'],
+  domains: ['Domains & HTTPS', 'Is every site live? Turn on HTTPS in one step'],
+  deploys: ['Deploys', 'GitHub pushes become risk-checked deploys — set it up here'],
+  automation: ['Automation', 'Runbooks, auto-scaling schedules and the daily summary'],
+  activity: ['Activity', 'Everything AtlasOS and people did — the audit trail'],
+  approvals: ['Approvals', 'Fixes waiting for a human — the same queue as Slack'],
+  incidents: ['Incidents & SLOs', 'Open incidents and error budgets'],
+  commands: ['Command Runner', 'Every agent CLI command, with its options'],
+  system: ['System', "AtlasOS's own services, event queue, backups and logs"],
+  settings: ['Settings', 'Connect your tools and protect the dashboard'],
+  about: ['About AtlasOS', 'Skills, and everything the assistant can run'],
+}
+
+function load(key, fallback) { try { return localStorage.getItem(key) ?? fallback } catch { return fallback } }
+function save(key, v) { try { localStorage.setItem(key, v) } catch { /* private window */ } }
+
+/** Live cluster snapshot over /ws/live (reconnects). Demo mode: sample data. */
+function useLive(demo) {
+  const [live, setLive] = useState(null)
   useEffect(() => {
-    fetch('/api/commands')
-      .then(r => r.json())
-      .then(data => {
-        setCommandGroups(data)
-        setCmdCount(Object.values(data).reduce((s, c) => s + c.length, 0))
-      }).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    let ws, retryTimer
+    if (demo) { setLive(demoLive()); return undefined }
+    setLive(null)
+    let ws, retry, dead = false
     const connect = () => {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws'
       ws = new WebSocket(`${proto}://${location.host}/ws/live`)
-      ws.onmessage = e => { try { setLiveData(JSON.parse(e.data)) } catch (_) {} }
-      ws.onclose   = () => { retryTimer = setTimeout(connect, 3000) }
+      ws.onmessage = e => { try { setLive(JSON.parse(e.data)) } catch { /* ignore */ } }
+      ws.onclose = () => { if (!dead) retry = setTimeout(connect, 3000) }
     }
     connect()
-    return () => { ws?.close(); clearTimeout(retryTimer) }
+    return () => { dead = true; ws?.close(); clearTimeout(retry) }
+  }, [demo])
+  return live
+}
+
+function useWidth() {
+  const [w, setW] = useState(() => window.innerWidth)
+  useEffect(() => {
+    const on = () => setW(window.innerWidth)
+    window.addEventListener('resize', on)
+    return () => window.removeEventListener('resize', on)
   }, [])
+  return w
+}
 
-  const handleSelectCmd = useCallback((cmd) => setActiveCmd(cmd), [])
-  const handleNav = useCallback((s) => { setActiveSection(s); setActiveCmd(null) }, [])
+const CHAT_W_MIN = 320, CHAT_W_MAX = 640, CHAT_W_DEFAULT = 388
 
-  const stats = liveData?.stats || {}
+/** Draggable width for the docked assistant panel: drag the handle on its
+ *  left edge, double-click to reset, remembered across visits. */
+function useResizableWidth(storageKey, initial, min, max) {
+  const [width, setWidth] = useState(() => {
+    const v = parseInt(load(storageKey, String(initial)), 10)
+    return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : initial
+  })
+  useEffect(() => { save(storageKey, String(width)) }, [storageKey, width])
+  const onMouseDown = useCallback(e => {
+    e.preventDefault()
+    const startX = e.clientX, startWidth = width
+    const handle = e.currentTarget
+    handle.classList.add('dragging')
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    const onMove = ev => setWidth(Math.min(max, Math.max(min, startWidth + (startX - ev.clientX))))
+    const onUp = () => {
+      handle.classList.remove('dragging')
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [width, min, max])
+  return [width, onMouseDown, setWidth]
+}
+
+/** Re-fetch whenever the header Refresh button bumps `refreshKey`. */
+function useRefresh(poll, refreshKey) {
+  const first = useRef(true)
+  useEffect(() => {
+    if (first.current) { first.current = false; return }
+    poll.reload()
+  }, [refreshKey]) // eslint-disable-line react-hooks/exhaustive-deps
+}
+
+function ClusterPanel({ refreshKey, onAsk, onConnected, onLogs }) {
+  const cluster = useData('cluster', '/api/cluster', 30000)
+  useRefresh(cluster, refreshKey)
+  return <Cluster cluster={cluster} onAsk={onAsk} onConnected={onConnected} onLogs={onLogs} />
+}
+function JenkinsPanel({ refreshKey, onAsk, onLogs }) {
+  const builds = useData('jenkins', '/api/jenkins/builds', 60000)
+  useRefresh(builds, refreshKey)
+  return <Jenkins builds={builds} onAsk={onAsk} onLogs={onLogs} />
+}
+function GitHubPanel({ refreshKey, onAsk, onLogs }) {
+  const [repo, setRepo] = useState(() => load('atlas-gh-repo', ''))
+  useEffect(() => { save('atlas-gh-repo', repo) }, [repo])
+  const runs = useData('github', `/api/github/runs?repo=${encodeURIComponent(repo)}&limit=40`, 60000)
+  useRefresh(runs, refreshKey)
+  return <GitHub runs={runs} repo={repo} setRepo={setRepo} onAsk={onAsk} onLogs={onLogs} />
+}
+function AwsPanel({ refreshKey, onAsk }) {
+  const aws = useData('aws', '/api/aws/overview')
+  useRefresh(aws, refreshKey)
+  return <Aws aws={aws} onAsk={onAsk} onRefresh={() => aws.reload('/api/aws/overview?force=true')} />
+}
+function IncidentsPanel({ refreshKey, onAsk }) {
+  const incidents = useData('incidents', '/api/incidents', 30000)
+  const slos = useData('slos', '/api/slos', 60000)
+  useRefresh(incidents, refreshKey); useRefresh(slos, refreshKey)
+  return <Incidents incidents={incidents} slos={slos} onAsk={onAsk} onChanged={() => { incidents.reload(); slos.reload() }} />
+}
+function OverviewPanel({ refreshKey, summary, actions, chart, spend, live, incidents, approvals, deploys, onNav, onRun, onAsk, onOpenChat, daemonRunning, demo }) {
+  const clusterMini = useData('cluster', '/api/cluster', 30000, demo)
+  const notifications = useData('notifications', '/api/notifications?limit=12', 20000, demo)
+  useRefresh(clusterMini, refreshKey); useRefresh(notifications, refreshKey)
+  return (
+    <Overview summary={summary} actions={actions} chart={chart} spend={spend} live={live} incidents={incidents}
+      approvals={approvals} deploys={deploys} cluster={clusterMini} notifications={notifications}
+      onNav={onNav} onRun={onRun} onAsk={onAsk} onOpenChat={onOpenChat} daemonRunning={daemonRunning} />
+  )
+}
+function AboutPanel({ refreshKey, about, chatInfo }) {
+  useRefresh(about, refreshKey)
+  return <About about={about} chatInfo={chatInfo} />
+}
+
+function ContextSwitcher({ clusters, onSwitched, demo }) {
+  const [open, setOpen] = useState(false)
+  const [err, setErr] = useState(null)
+  const list = clusters.data?.clusters || []
+  const cur = clusters.data?.current
+  const pick = async name => {
+    setOpen(false); setErr(null)
+    if (demo) return
+    try { await postJSON('/api/clusters/switch', { name }); onSwitched() } catch (e) { setErr(e.message) }
+  }
+  return (
+    <div style={{ position: 'relative' }}>
+      <button className="hoverable" onClick={() => setOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 34, maxWidth: 320, padding: '6px 10px', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'var(--color-surface)', fontSize: 12.5 }}>
+        <Icon name="ph-cube" style={{ color: 'var(--color-accent)' }} />
+        <span className="mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cur || 'no context'}</span>
+        <Icon name="ph-caret-up-down" style={{ color: 'var(--muted)' }} />
+      </button>
+      {err && <div style={{ position: 'absolute', right: 0, top: 'calc(100% + 4px)', fontSize: 11.5, color: 'var(--st-crit)' }}>{err}</div>}
+      {open && (
+        <div style={{ position: 'absolute', right: 0, top: 'calc(100% + 6px)', width: 300, zIndex: 30, padding: 4, borderRadius: 'var(--radius-md)', background: 'var(--color-surface)', boxShadow: 'var(--shadow-md)' }}>
+          <div className="kicker" style={{ padding: '6px 8px 2px', fontSize: 10.5 }}>kube contexts</div>
+          <div className="muted" style={{ padding: '0 8px 6px', fontSize: 11 }}>
+            {demo ? 'Switching is disabled in demo mode.' : "Switching changes kubectl's current context for everything on this machine, including the daemon."}
+          </div>
+          {list.length === 0 && <div className="muted" style={{ padding: 8, fontSize: 12 }}>No contexts in your kubeconfig.</div>}
+          {list.map(c => (
+            <button key={c.name} className="rowbtn" onClick={() => pick(c.name)} disabled={demo} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '7px 8px', border: 0, borderRadius: 6, background: 'transparent', cursor: demo ? 'default' : 'pointer', textAlign: 'left' }}>
+              <Icon name={c.health === 'healthy' ? 'ph-check-circle' : c.health === 'unreachable' ? 'ph-plugs' : 'ph-question'}
+                style={{ color: c.health === 'healthy' ? 'var(--st-ok)' : 'var(--st-unk)' }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="mono" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
+                <div className="muted" style={{ fontSize: 11 }}>{c.health === 'healthy' ? `${c.node_count} nodes` : c.health === 'unreachable' ? 'unreachable' : 'not checked'}</div>
+              </div>
+              {c.name === cur && <Icon name="ph-check" style={{ color: 'var(--color-accent)' }} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DemoSwitch({ demo, onToggle }) {
+  return (
+    <button role="switch" aria-checked={demo} onClick={onToggle} title="Show realistic sample data instead of your live systems"
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '5px 10px', borderRadius: 'var(--radius-md)', border: `1px solid ${demo ? 'var(--st-warn)' : 'var(--color-divider)'}`, background: demo ? 'color-mix(in srgb, var(--st-warn) 12%, transparent)' : 'transparent', cursor: 'pointer', fontSize: 12.5, color: demo ? 'var(--st-warn)' : 'var(--color-text)' }}>
+      <span style={{ position: 'relative', width: 26, height: 14, borderRadius: 7, background: demo ? 'var(--st-warn)' : 'color-mix(in srgb, var(--color-text) 18%, transparent)' }}>
+        <span style={{ position: 'absolute', top: 2, left: demo ? 14 : 2, width: 10, height: 10, borderRadius: '50%', background: 'var(--color-surface)', transition: 'left .15s' }} />
+      </span>
+      Demo data
+    </button>
+  )
+}
+
+/** Full-width bar above the sidebar/main/chat grid: brand, global search
+ *  (opens the Ctrl+K palette — same live /api/search it always used), the
+ *  cluster context, notifications, and a settings shortcut in place of a
+ *  fabricated user identity (the dashboard has one shared login, not
+ *  per-user accounts). */
+function TopBar({ mobile, onOpenNav, onOpenPalette, version, clusters, demo, onClustersChanged, onNav }) {
+  return (
+    <header style={{
+      position: 'sticky', top: 0, zIndex: 50, height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', gap: 14,
+      padding: '0 16px', background: 'var(--color-bg-2)', boxShadow: '0 1px 0 var(--color-divider)',
+    }}>
+      {mobile && (
+        <button className="btn btn-secondary btn-icon" onClick={onOpenNav} aria-label="Open menu"><Icon name="ph-list" size={18} /></button>
+      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, flex: mobile ? '0 0 auto' : '0 0 190px' }}>
+        <div style={{
+          width: 30, height: 30, borderRadius: 9, border: '1px solid var(--color-accent)', display: 'grid', placeItems: 'center',
+          color: 'var(--color-accent)', boxShadow: '0 0 14px color-mix(in srgb, var(--color-accent) 30%, transparent)', flex: 'none',
+        }}><Icon name="ph-globe-simple" size={16} /></div>
+        {!mobile && (
+          <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.15, minWidth: 0 }}>
+            <span style={{ fontSize: 14.5, fontWeight: 500, letterSpacing: '-0.01em' }}>AtlasOS</span>
+            <span className="mono muted" style={{ fontSize: 10 }}>{version ? `v${version} · local` : 'local'}</span>
+          </div>
+        )}
+      </div>
+
+      <button onClick={onOpenPalette} style={{
+        flex: '1 1 auto', display: 'flex', alignItems: 'center', gap: 9, minHeight: 36, maxWidth: 640, margin: '0 auto', padding: '0 12px',
+        borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'var(--color-surface)', cursor: 'pointer',
+        color: 'var(--muted)', fontSize: 13, textAlign: 'left',
+      }}>
+        <Icon name="ph-magnifying-glass" size={15} />
+        {!mobile && <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Search incidents, pods, builds, AWS, domains…</span>}
+        {!mobile && <kbd className="mono" style={{ fontSize: 10.5, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--color-divider)', flex: 'none' }}>Ctrl K</kbd>}
+      </button>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '0 0 auto' }}>
+        {!mobile && <ContextSwitcher clusters={clusters} demo={demo} onSwitched={onClustersChanged} />}
+        <Inbox onNav={onNav} demo={demo} />
+        <button className="btn btn-ghost btn-icon" onClick={() => onNav('settings')} aria-label="Settings" title="Settings"
+          style={{ width: 32, height: 32, borderRadius: '50%', border: '1px solid var(--color-divider)', color: 'var(--muted)' }}>
+          <Icon name="ph-user-circle" size={19} />
+        </button>
+      </div>
+    </header>
+  )
+}
+
+function Shell() {
+  const [panel, setPanel] = useState(() => {
+    const h = location.hash.slice(1)
+    return NAV.some(n => n.id === h) ? h : 'overview'
+  })
+  const [demo, setDemo] = useState(() => load('atlas-demo', '0') === '1')
+  const [theme, setTheme] = useState(() => load('atlas-theme', 'dark'))
+  const [chatOpen, setChatOpen] = useState(() => load('atlas-chat-open', '1') === '1')
+  const [askRequest, setAskRequest] = useState(null)
+  const [run, setRun] = useState(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [navOpen, setNavOpen] = useState(false)
+  const [cmdSel, setCmdSel] = useState(null)
+  const [toast, setToast] = useState(null)
+  const [logSource, setLogSource] = useState(null)
+  const lastQuick = useRef(null)
+  const width = useWidth()
+  const mobile = width < 900
+  const dock = width >= 1340 && !mobile   // wide enough to dock the assistant as a third column
+  const [chatWidth, onChatResizeStart, setChatWidth] = useResizableWidth('atlas-chat-width', CHAT_W_DEFAULT, CHAT_W_MIN, CHAT_W_MAX)
+
+  const live = useLive(demo)
+  // Shell renders the DemoCtx provider, so its own hooks get `demo` passed in.
+  const summary = useData('summary', '/api/summary', 300000, demo)
+  const actions = useData('actions', '/api/actions', 30000, demo)
+  const approvals = useData('approvals', '/api/approvals', 30000, demo)
+  const deploys = useData('deploys', '/api/pending-deploys', 30000, demo)
+  const clusters = useData('clusters', '/api/clusters', 0, demo)
+  const chart = useData('chart', '/api/chart', 300000, demo)
+  const spend = useData('spend', '/api/spend', 3600000, demo)
+  const incidents = useData('incidents', '/api/incidents', 30000, demo)
+  const commands = usePoll('/api/commands')
+  const chatInfo = usePoll('/api/chat/info')
+  const about = usePoll('/api/about')
+
+  useEffect(() => { document.documentElement.dataset.theme = theme; save('atlas-theme', theme) }, [theme])
+  useEffect(() => { save('atlas-demo', demo ? '1' : '0') }, [demo])
+  useEffect(() => { save('atlas-chat-open', chatOpen ? '1' : '0') }, [chatOpen])
+  useEffect(() => { history.replaceState(null, '', `#${panel}`); setNavOpen(false) }, [panel])
+  useEffect(() => {
+    const onKey = e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPaletteOpen(o => !o) } }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  useEffect(() => { if (!toast) return undefined; const t = setTimeout(() => setToast(null), 3500); return () => clearTimeout(t) }, [toast])
+
+  const ask = useCallback(text => { setChatOpen(true); setAskRequest({ text, at: Date.now() }) }, [])
+
+  const refresh = () => {
+    setRefreshKey(k => k + 1)
+    if (demo) return
+    if (panel === 'overview') { summary.reload('/api/summary?force=true'); actions.reload(); chart.reload(); spend.reload() }
+    if (panel === 'approvals') { approvals.reload(); deploys.reload() }
+    if (panel === 'overview') { incidents.reload(); approvals.reload(); deploys.reload() }
+    clusters.reload()
+  }
+
+  const runQuick = useCallback(async q => {
+    if (demo) { setToast('Actions are disabled in demo mode — switch Demo data off to run it for real.'); return }
+    lastQuick.current = q
+    if (q.id === 'daemon') {
+      const stopping = !!live?.stats?.daemon_running
+      const cmd = `agent daemon ${stopping ? 'stop' : 'start'}`
+      setRun({ name: stopping ? 'Stop Daemon' : 'Start Daemon', cmd, icon: 'ph-heartbeat', lines: [`$ ${cmd}`], status: 'running' })
+      try {
+        const r = await postJSON(`/api/daemon/${stopping ? 'stop' : 'start'}`)
+        const ok = !r.error && r.status !== 'error'
+        const msg = { started: `✓ daemon started · pid ${r.pid}`, already_running: `! already running · pid ${r.pid}`,
+          stopped: `✓ daemon stopped · pid ${r.pid} · auto-healing paused`, not_running: '! daemon was not running' }[r.status] || `✗ ${r.error || r.status}`
+        setRun(x => ({ ...x, lines: [...x.lines, msg], status: ok ? 'ok' : 'failed' }))
+      } catch (e) {
+        setRun(x => ({ ...x, lines: [...x.lines, `✗ ${e.message}`], status: 'failed' }))
+      }
+      return
+    }
+    const cmd = `agent ${q.cmd}`
+    setRun({ name: q.name, cmd, icon: q.icon, lines: [`$ ${cmd}`], status: 'running' })
+    try {
+      const code = await runCommand(q.cmd, {}, !!q.confirmed, ln => setRun(x => (x ? { ...x, lines: [...x.lines, ln] } : x)))
+      setRun(x => (x ? { ...x, status: code === 0 ? 'ok' : 'failed' } : x))
+    } catch (e) {
+      setRun(x => (x ? { ...x, lines: [...x.lines, `✗ ${e.message}`], status: 'failed' } : x))
+    }
+    actions.reload()
+  }, [demo, live, actions])
+
+  const askAboutRun = r => {
+    const out = r.lines.slice(1).join('\n')
+    const clipped = out.length > 3500 ? '…' + out.slice(-3500) : out
+    setRun(null)
+    ask(`I ran \`${r.cmd}\` from the dashboard. Output:\n${clipped}\n\nWhat does this mean, and is there anything I should do?`)
+  }
+
+  const context = clusters.data?.current || ''
+  const pendingCount = (approvals.data?.pending.length || 0) + (deploys.data?.length || 0)
+  const badges = {
+    approvals: pendingCount ? { n: pendingCount, t: 'warn' } : null,
+    incidents: live?.stats?.incidents_open ? { n: live.stats.incidents_open, t: 'crit' } : null,
+  }
+  const [title, sub] = TITLES[panel]
+  const showBanner = !demo && live?.offline && (panel === 'overview' || panel === 'cluster')
+  const allCommands = useMemo(() => Object.values(commands.data || {}).flat().filter(c => !c.is_eval), [commands.data])
+  const quickItems = useMemo(() => [...QUICK, { id: 'daemon', name: live?.stats?.daemon_running ? 'Stop Daemon' : 'Start Daemon', icon: 'ph-heartbeat' }], [live])
+  const toggles = useMemo(() => [
+    { label: `Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`, icon: theme === 'dark' ? 'ph-sun' : 'ph-moon', run: () => setTheme(t => (t === 'dark' ? 'light' : 'dark')) },
+    { label: demo ? 'Turn off demo data' : 'Turn on demo data', icon: 'ph-presentation-chart', run: () => setDemo(d => !d) },
+    { label: 'Open the assistant', icon: 'ph-chat-circle-dots', run: () => setChatOpen(true) },
+  ], [theme, demo])
+
+  const sidebar = (
+    <Sidebar panel={panel} onNav={setPanel} badges={badges} live={live} context={context}
+      theme={theme} onToggleTheme={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))} />
+  )
+  const showChatPanel = dock && chatOpen
 
   return (
-    <div style={{ display:'flex', flexDirection:'column', height:'100vh', background:'#080808', fontFamily:"'Courier New',monospace", overflow:'hidden' }}>
+    <DemoCtx.Provider value={demo}>
+      <div style={{ '--topbar-h': `${TOPBAR_H}px`, minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+        <TopBar mobile={mobile} onOpenNav={() => setNavOpen(true)} onOpenPalette={() => setPaletteOpen(true)}
+          version={about.data?.version} clusters={clusters} demo={demo} onNav={setPanel}
+          onClustersChanged={() => { clusters.reload(); setRefreshKey(k => k + 1) }} />
 
-      {/* ── TOP BAR ─────────────────────────────────────────────── */}
-      <header style={{
-        display:'flex', alignItems:'center', justifyContent:'space-between',
-        padding:'0 28px', height:66, borderBottom:'1px solid #1e1e1e',
-        background:'linear-gradient(180deg,#0e0e0e 0%,#0a0a0a 100%)',
-        flexShrink:0, zIndex:10,
-      }}>
-        <div style={{ display:'flex', alignItems:'center', gap:24 }}>
-          {/* logo */}
-          <div style={{ display:'flex', alignItems:'center', gap:11 }}>
-            <div style={{ width:28, height:28, background:'#e05020', clipPath:'polygon(0 0,100% 0,100% 65%,65% 100%,0 100%)', flexShrink:0, boxShadow:'0 0 16px #e0502055' }} />
-            <span style={{ color:'#fff', fontSize:19, fontWeight:700, letterSpacing:5 }}>ATLASOS</span>
-          </div>
-          <div style={{ width:1, height:32, background:'#1e1e1e' }} />
-          {/* live chips */}
-          <div style={{ display:'flex', gap:9 }}>
-            <StatChip label="HEALED" value={stats.pods_healed_today ?? 0} color="#22c55e" />
-            <StatChip label="INCIDENTS" value={stats.incidents_open ?? 0} color={stats.incidents_open > 0 ? '#ef4444' : '#22c55e'} />
-            <StatChip label="SAVED/MO" value={`$${(stats.cost_saved_month ?? 0).toFixed(0)}`} color="#f59e0b" />
-            <StatChip label="CMDS" value={cmdCount} color="#818cf8" />
-          </div>
-        </div>
-        <div style={{ display:'flex', alignItems:'center', gap:14 }}>
-          <button
-            onClick={() => setAboutOpen(true)}
-            title="About AtlasOS — architecture & live project scan"
-            aria-label="About AtlasOS"
-            style={{
-              width:32, height:32, borderRadius:'50%', flexShrink:0,
-              background:'transparent', border:'1px solid #2a2a2a', color:'#a6a6a6',
-              cursor:'pointer', fontSize:16, fontWeight:700, lineHeight:1,
-              display:'flex', alignItems:'center', justifyContent:'center', transition:'all .15s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor='#e05020'; e.currentTarget.style.color='#e05020' }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor='#2a2a2a'; e.currentTarget.style.color='#a6a6a6' }}>
-            ?
-          </button>
-          <DaemonControl liveData={liveData} />
-        </div>
-      </header>
+        <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'minmax(0, 1fr)' : showChatPanel ? `216px minmax(0, 1fr) ${chatWidth}px` : '216px minmax(0, 1fr)', flex: 1, minHeight: 0 }}>
+          {!mobile && sidebar}
+          {mobile && navOpen && (
+            <>
+              <div onClick={() => setNavOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 54, background: 'color-mix(in srgb, var(--color-bg) 60%, transparent)' }} />
+              <div style={{ position: 'fixed', top: 0, left: 0, bottom: 0, width: 240, zIndex: 55, boxShadow: 'var(--shadow-lg)' }}>{sidebar}</div>
+            </>
+          )}
 
-      <AboutPanel open={aboutOpen} onClose={() => setAboutOpen(false)} />
-
-      {/* ── BODY ────────────────────────────────────────────────── */}
-      <div style={{ display:'flex', flex:1, overflow:'hidden' }}>
-
-        {/* Sidebar */}
-        <Sidebar
-          commandGroups={commandGroups}
-          activeSection={activeSection}
-          activeCmd={activeCmd}
-          onSelectCmd={handleSelectCmd}
-          onNav={handleNav}
-        />
-
-        {/* Main content */}
-        <main style={{ flex:1, overflow:'auto', padding:24, display:'flex', flexDirection:'column', gap:20 }}>
-          {activeSection === 'overview'  && <OverviewPage liveData={liveData} />}
-          {activeSection === 'clusters'  && <ClustersPanel />}
-          {activeSection === 'incidents' && <IncidentsPanel />}
-          {activeSection === 'slos'      && <SLOPanel />}
-          {activeSection === 'jenkins'   && <JenkinsPanel />}
-          {activeSection === 'approvals' && <PendingApprovals />}
-        </main>
-
-        {/* ── COMMAND PANEL (slides in from right) ─────────────── */}
-        <div style={{
-          width: activeCmd ? 460 : 0,
-          minWidth: activeCmd ? 460 : 0,
-          overflow: 'hidden',
-          transition: 'width .22s cubic-bezier(.4,0,.2,1), min-width .22s cubic-bezier(.4,0,.2,1)',
-          borderLeft: activeCmd ? '1px solid #1e1e1e' : 'none',
-          background: '#0a0a0a',
-          flexShrink: 0,
-          display: 'flex',
-          flexDirection: 'column',
-        }}>
-          {activeCmd && (
-            <div style={{ width:460, height:'100%', overflow:'auto', padding:24, display:'flex', flexDirection:'column', gap:0 }}>
-              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:22, flexShrink:0 }}>
-                <div>
-                  <div style={{ fontSize:12, letterSpacing:2, color:'#9a9a9a', marginBottom:5 }}>RUN COMMAND</div>
-                  <div style={{ fontSize:17, color:'#e05020', letterSpacing:1 }}>{activeCmd.full_command}</div>
-                </div>
-                <button onClick={() => setActiveCmd(null)} style={{
-                  background:'transparent', border:'1px solid #222', color:'#a6a6a6',
-                  cursor:'pointer', fontSize:18, lineHeight:1, padding:'4px 8px',
-                  transition:'all .15s',
-                }}
-                  onMouseEnter={e => { e.currentTarget.style.borderColor='#e05020'; e.currentTarget.style.color='#e05020' }}
-                  onMouseLeave={e => { e.currentTarget.style.borderColor='#222'; e.currentTarget.style.color='#a6a6a6' }}>
-                  ✕
-                </button>
+          <main style={{ minWidth: 0, padding: mobile ? '12px 16px 96px' : '18px 28px 96px', display: 'flex', flexDirection: 'column', gap: 18 }}>
+            <header style={{ display: 'flex', alignItems: 'flex-end', gap: '12px 12px', flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0, flex: '1 1 220px' }}>
+                <h1 style={{ fontSize: 22, marginBottom: 3 }}>{title}</h1>
+                <div className="muted" style={{ fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{panel === 'cluster' ? context || sub : sub}</div>
               </div>
-              <CommandRunner cmd={activeCmd} key={activeCmd.full_command} />
+              {panel === 'cluster' && <ContextSwitcher clusters={clusters} demo={demo} onSwitched={() => { clusters.reload(); setRefreshKey(k => k + 1) }} />}
+              <DemoSwitch demo={demo} onToggle={() => setDemo(d => !d)} />
+              <button className="btn btn-secondary" onClick={refresh} style={{ padding: '5px 10px', fontSize: 12.5 }}><Icon name="ph-arrow-clockwise" />{mobile ? '' : 'Refresh'}</button>
+              {dock && !chatOpen && (
+                <button className="btn btn-primary" onClick={() => setChatOpen(true)} style={{ padding: '5px 10px', fontSize: 12.5 }}>
+                  <Icon name="ph-sparkle" />Assistant
+                </button>
+              )}
+            </header>
+
+          {demo && (
+            <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', borderRadius: 'var(--radius-md)', border: '1px solid color-mix(in srgb, var(--st-warn) 45%, transparent)', background: 'color-mix(in srgb, var(--st-warn) 10%, transparent)', fontSize: 12.5 }}>
+              <Icon name="ph-presentation-chart" size={17} style={{ color: 'var(--st-warn)' }} />
+              <span><strong style={{ fontWeight: 600 }}>Demo data.</strong> Everything below is sample data, not your systems. Actions are disabled. The assistant still talks to your live systems.</span>
+              <button className="btn btn-ghost" onClick={() => setDemo(false)} style={{ marginLeft: 'auto', fontSize: 12 }}>Show live data</button>
+            </div>
+          )}
+
+          {showBanner && (
+            <div role="alert" style={{ display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap', padding: '14px 16px', borderRadius: 'var(--radius-md)', border: '1px dashed var(--st-unk)', background: 'var(--hatch), color-mix(in srgb, var(--st-unk) 8%, var(--color-surface))' }}>
+              <div style={{ width: 32, height: 32, borderRadius: '50%', display: 'grid', placeItems: 'center', border: '1.5px solid var(--st-unk)', color: 'var(--st-unk)', flex: 'none' }}><Icon name="ph-plugs" size={17} /></div>
+              <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ fontSize: 14.5, fontWeight: 500 }}>Cluster unreachable — showing no data, not "no problems"</div>
+                <div className="muted" style={{ fontSize: 12.5 }}>
+                  The Kubernetes API server for <span className="mono">{context || 'the current context'}</span> didn't answer.
+                  Cluster numbers are unknown until it does, and the daemon can't heal anything meanwhile.
+                  {panel === 'overview' && <> Connect another cluster from the <a href="#cluster" onClick={e => { e.preventDefault(); setPanel('cluster') }}>Cluster</a> page.</>}
+                </div>
+              </div>
+              <button className="btn btn-secondary" onClick={refresh}><Icon name="ph-arrow-clockwise" />Retry</button>
+            </div>
+          )}
+
+          {panel === 'overview' && <SetupChecklist live={live} context={context} onNav={setPanel} />}
+          {panel === 'overview' && (
+            <OverviewPanel refreshKey={refreshKey} summary={summary} actions={actions} chart={chart} spend={spend} live={live}
+              incidents={incidents} approvals={approvals} deploys={deploys} onNav={setPanel} onRun={runQuick} onAsk={ask}
+              onOpenChat={() => setChatOpen(true)} daemonRunning={!!live?.stats?.daemon_running} demo={demo} />
+          )}
+          {panel === 'cluster' && <ClusterPanel refreshKey={refreshKey} onAsk={ask} onConnected={() => clusters.reload()} onLogs={setLogSource} />}
+          {panel === 'jenkins' && <JenkinsPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
+          {panel === 'github' && <GitHubPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
+          {panel === 'aws' && <AwsPanel refreshKey={refreshKey} onAsk={ask} />}
+          {panel === 'databases' && <Databases key={refreshKey} onAsk={ask} />}
+          {panel === 'domains' && <Domains key={refreshKey} onAsk={ask} />}
+          {panel === 'deploys' && <Deploys key={refreshKey} onNav={setPanel} />}
+          {panel === 'automation' && <Automation key={refreshKey} summary={summary} onLogs={setLogSource} />}
+          {panel === 'activity' && <Activity key={refreshKey} />}
+          {panel === 'settings' && <Settings key={refreshKey} live={live} context={context} onNav={setPanel} />}
+          {panel === 'system' && <System key={refreshKey} onLogs={setLogSource} onDaemon={() => runQuick({ id: 'daemon' })} />}
+          {panel === 'approvals' && <Approvals approvals={approvals} deploys={deploys} onChanged={() => { approvals.reload(); deploys.reload() }} />}
+          {panel === 'incidents' && <IncidentsPanel refreshKey={refreshKey} onAsk={ask} />}
+          {panel === 'commands' && <Commands key={cmdSel || 'none'} commands={commands} context={context} initial={cmdSel} />}
+          {panel === 'about' && <AboutPanel refreshKey={refreshKey} about={about} chatInfo={chatInfo} />}
+          </main>
+
+          {showChatPanel && (
+            <div style={{ position: 'sticky', top: 'var(--topbar-h)', height: 'calc(100vh - var(--topbar-h))', minWidth: 0 }}>
+              <div className="chat-resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize assistant panel"
+                aria-valuenow={chatWidth} aria-valuemin={CHAT_W_MIN} aria-valuemax={CHAT_W_MAX} tabIndex={0}
+                onMouseDown={onChatResizeStart} onDoubleClick={() => setChatWidth(CHAT_W_DEFAULT)}
+                onKeyDown={e => {
+                  if (e.key === 'ArrowLeft') setChatWidth(w => Math.min(CHAT_W_MAX, w + 24))
+                  if (e.key === 'ArrowRight') setChatWidth(w => Math.max(CHAT_W_MIN, w - 24))
+                }}
+                style={{ position: 'absolute', left: -4, top: 0, bottom: 0, width: 8, cursor: 'col-resize', zIndex: 20 }}
+                title="Drag to resize · double-click to reset" />
+              <ChatWidget variant="panel" open setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
+                incidents={incidents} onNav={setPanel} />
             </div>
           )}
         </div>
+
+        <LogViewer source={logSource} onClose={() => setLogSource(null)} onAsk={ask} />
+        <RunDrawer run={run}onClose={() => setRun(null)} onRerun={lastQuick.current ? () => runQuick(lastQuick.current) : null} onAsk={askAboutRun} />
+        {!showChatPanel && (
+          <ChatWidget variant="overlay" open={chatOpen} setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
+            incidents={incidents} onNav={setPanel} />
+        )}
+        <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} nav={NAV} quick={quickItems} commands={allCommands}
+          onNav={setPanel} onRun={runQuick} onPickCommand={c => { setCmdSel(c); setPanel('commands') }} onAsk={ask} toggles={toggles} />
+        {toast && (
+          <div role="status" style={{ position: 'fixed', left: '50%', bottom: 24, transform: 'translateX(-50%)', zIndex: 70, maxWidth: 'calc(100vw - 32px)', padding: '10px 14px', borderRadius: 'var(--radius-md)', background: 'var(--color-surface)', boxShadow: 'var(--shadow-lg)', fontSize: 12.5 }}>
+            {toast}
+          </div>
+        )}
       </div>
-    </div>
+    </DemoCtx.Provider>
   )
 }
 
-function StatChip({ label, value, color }) {
-  return (
-    <div style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 15px', background:`${color}0f`, border:`1px solid ${color}28`, borderRadius:2 }}>
-      <span style={{ fontSize:12, letterSpacing:1.5, color:'#9a9a9a' }}>{label}</span>
-      <span style={{ fontSize:16, fontWeight:700, color, letterSpacing:0.5 }}>{value}</span>
-    </div>
-  )
-}
-
-function OverviewPage({ liveData }) {
-  const stats = liveData?.stats || {}
-  return (
-    <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:14 }}>
-        <BigStatCard label="PODS HEALED TODAY" value={stats.pods_healed_today ?? '—'} sub="auto-fixed by daemon" accent="#22c55e" />
-        <BigStatCard label="OPEN INCIDENTS"    value={stats.incidents_open ?? '—'}    sub="active right now"    accent={stats.incidents_open > 0 ? '#ef4444' : '#22c55e'} />
-        <BigStatCard label="COST SAVED / 30D"  value={`$${(stats.cost_saved_month ?? 0).toFixed(0)}`} sub="AWS waste eliminated" accent="#f59e0b" />
-        <BigStatCard label="ACTIONS / 30D"     value={stats.actions_30d ?? '—'}       sub="autonomous operations" accent="#818cf8" />
-      </div>
-      <div style={{ display:'grid', gridTemplateColumns:'1.4fr 1fr', gap:14 }}>
-        <LiveClusterPanel liveData={liveData} />
-        <ActivityFeed />
-      </div>
-    </div>
-  )
-}
-
-function BigStatCard({ label, value, sub, accent }) {
-  return (
-    <div style={{
-      background:'#111', border:'1px solid #1e1e1e', borderLeft:`3px solid ${accent}`,
-      padding:'22px 24px', cursor:'default', transition:'box-shadow .2s, border-color .2s',
-    }}
-      onMouseEnter={e => { e.currentTarget.style.boxShadow = `0 0 0 1px ${accent}30`; e.currentTarget.style.borderColor = `${accent}60` }}
-      onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none'; e.currentTarget.style.borderTopColor = '#1e1e1e'; e.currentTarget.style.borderRightColor = '#1e1e1e'; e.currentTarget.style.borderBottomColor = '#1e1e1e' }}>
-      <div style={{ fontSize:13, letterSpacing:2, color:'#9a9a9a', marginBottom:14 }}>{label}</div>
-      <div style={{ fontSize:40, fontWeight:700, color:'#fff', letterSpacing:1, lineHeight:1 }}>{value}</div>
-      <div style={{ fontSize:14, color:'#858585', marginTop:12 }}>{sub}</div>
-    </div>
-  )
+/** Gate on the optional dashboard login (DASHBOARD_TOKEN). */
+export default function App() {
+  const [auth, setAuth] = useState(null)   // null = checking
+  const check = useCallback(() => {
+    getJSON('/api/auth/status').then(setAuth).catch(() => setAuth({ required: false, ok: true }))
+  }, [])
+  useEffect(() => {
+    check()
+    const on = () => setAuth(a => (a ? { ...a, ok: false, required: true } : a))
+    window.addEventListener('atlas-auth-required', on)
+    return () => window.removeEventListener('atlas-auth-required', on)
+  }, [check])
+  if (!auth) return null
+  if (auth.required && !auth.ok) return <Login onDone={check} />
+  return <Shell />
 }
