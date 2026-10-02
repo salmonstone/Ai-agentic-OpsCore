@@ -31,6 +31,7 @@ export async function gotoPanel(page, hash, opts) {
 // reliable place to assert against).
 export const NAV_PAGES = [
   ['overview', 'Overview'], ['cluster', 'Cluster'], ['databases', 'Databases'],
+  ['network', 'Network'], ['costwaste', 'Cost & Waste'],
   ['jenkins', 'Jenkins'], ['github', 'GitHub Actions'], ['deploys', 'Deploys'],
   ['aws', 'AWS'], ['domains', 'Domains & HTTPS'],
   ['automation', 'Automation'], ['commands', 'Command Runner'], ['system', 'System'],

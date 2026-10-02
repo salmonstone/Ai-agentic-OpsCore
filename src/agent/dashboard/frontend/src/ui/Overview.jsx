@@ -200,6 +200,8 @@ function QuickOps({ onRun, onNav, onAsk, onOpenChat, daemonRunning }) {
     { id: 'daemon', cat: 'k8s', icon: 'ph-heartbeat', label: daemonRunning ? 'Stop Daemon' : 'Start Daemon', sub: daemonRunning ? 'pause auto-healing' : 'starts the watchers', run: () => onRun({ id: 'daemon' }) },
     { id: 'cluster', cat: 'k8s', icon: 'ph-cube', label: 'View Cluster', sub: 'nodes & problem pods', run: () => onNav('cluster') },
     { id: 'diag-k8s', cat: 'k8s', icon: 'ph-sparkle', label: 'AI Diagnose Cluster', sub: 'ask what\'s wrong', run: () => onAsk('Diagnose my cluster — what, if anything, needs attention?') },
+    { id: 'network', cat: 'k8s', icon: 'ph-share-network', label: 'Scan Network', sub: 'CNI, kube-proxy, policies', run: () => onNav('network') },
+    { id: 'k8s-cost', cat: 'k8s', icon: 'ph-coins', label: 'Cost & Waste', sub: 'per-pod/node estimates', run: () => onNav('costwaste') },
     { id: 'jenkins-scan', cat: 'cicd', icon: 'ph-hammer', label: 'Scan Jenkins', sub: 'failing jobs · AI', run: () => onRun(QUICK[2]) },
     { id: 'jenkins', cat: 'cicd', icon: 'ph-wrench', label: 'View Jenkins', sub: 'builds & agents', run: () => onNav('jenkins') },
     { id: 'github', cat: 'cicd', icon: 'ph-github-logo', label: 'GitHub Actions', sub: 'workflow runs', run: () => onNav('github') },

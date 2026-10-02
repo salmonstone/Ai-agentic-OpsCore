@@ -229,7 +229,37 @@ const DEMO = {
     const daily = base.map((amount, i) => ({ date: new Date(Date.now() - (30 - i) * D).toISOString().slice(0, 10), amount }))
     return { daily, mean: 12.9, anomalies: [daily[18].date], generated_at: iso(20 * M) }
   },
+  cost_k8s: () => ({
+    reachable: true, cluster_name: 'eks-prod-ap-south-1', total_nodes: 3,
+    total_monthly_node_cost: 312.4, total_requested_cost: 198.6, total_waste_cost: 64.2, waste_percent: 32,
+    generated_at: iso(2 * M), claude_analysis: '',
+    namespaces: [{ namespace: 'prod', pod_count: 9, est_monthly_cost: 140.2 }, { namespace: 'data', pod_count: 4, est_monthly_cost: 58.4 }],
+    deployments: [
+      { deployment: 'worker', namespace: 'prod', pod_count: 4, total_cpu_request: 4.0, total_cpu_actual: 1.1, est_monthly_cost: 78.0, waste_percent: 72, waste_label: 'over-provisioned' },
+      { deployment: 'api', namespace: 'prod', pod_count: 3, total_cpu_request: 3.0, total_cpu_actual: 2.6, est_monthly_cost: 62.2, waste_percent: 13, waste_label: 'OK' },
+      { deployment: 'etl-runner', namespace: 'data', pod_count: 2, total_cpu_request: 2.0, total_cpu_actual: 1.9, est_monthly_cost: 58.4, waste_percent: 0, waste_label: 'OK' },
+    ],
+    top_wasteful_pods: [
+      { pod: 'worker-7d9c-abcde', namespace: 'prod', deployment: 'worker', cpu_request: 1.0, cpu_actual: 0.22, node_instance_type: 't3.large', est_monthly_cost: 19.5, waste_percent: 78, waste_label: 'over-provisioned' },
+      { pod: 'worker-7d9c-fghij', namespace: 'prod', deployment: 'worker', cpu_request: 1.0, cpu_actual: 0.31, node_instance_type: 't3.large', est_monthly_cost: 19.5, waste_percent: 69, waste_label: 'over-provisioned' },
+    ],
+  }),
+  network: () => ({
+    reachable: true, generated_at: iso(30 * 1000), collection_ms: 840,
+    cni_detected: 'calico', cni_healthy: true, nodes_ready: 3, nodes_total: 3,
+    analysis: 'Calico is running and healthy on all 3 nodes. One service has no ready endpoints behind it, which is the only networking issue found.',
+    issues: [
+      { severity: 'warning', problem_type: 'ServiceNoEndpoints', resource: 'billing-api', namespace: 'prod',
+        description: 'Service billing-api has no ready pods behind it, so requests to it will fail.',
+        fix: 'Check why the billing-api deployment has 0 ready replicas — likely a crashing pod or a selector mismatch.',
+        fix_command: 'kubectl get endpoints billing-api -n prod' },
+    ],
+  }),
 }
+
+/** Demo fixture for the on-demand Network scan (not polled, so it bypasses
+ *  useData — same shape as the live /api/network/scan response). */
+export const demoNetwork = () => DEMO.network()
 
 /** Like usePoll, but returns sample data (and fetches nothing) in demo mode.
  *  Components inside the DemoCtx provider get the flag from context; the

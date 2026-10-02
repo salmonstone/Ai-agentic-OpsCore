@@ -92,39 +92,31 @@ class NetworkSkill(BaseSkill):
     # Public helpers
     # ------------------------------------------------------------------
 
-    def scan(self) -> str:
-        from rich.console import Console
-        from rich.panel  import Panel
-        from rich.rule   import Rule
-        from rich.progress import Progress, SpinnerColumn, TextColumn
+    def scan_report(self) -> NetworkScanReport:
+        """Collect network data and have Claude turn it into a structured
+        report. No console output — the one path both `scan()` (CLI) and
+        the dashboard's /api/network/scan call, so they can never drift."""
+        data, elapsed = collect_all_network()
 
-        console = Console()
+        collector_text = "\n".join(
+            f"[{area}] ok={r['ok']} | {r['summary']}"
+            for area, r in data.items()
+        )
+        try:
+            raw = asyncio.run(llm.chat(
+                messages=[{"role": "user", "content": collector_text}],
+                system=_SCAN_SYSTEM,
+                json_mode=True,
+                max_tokens=1400,
+            ))
+            parsed = _parse_json(raw.content)
+        except Exception as exc:
+            log.warning("network.scan.llm_failed", error=str(exc))
+            parsed = {"summary": "LLM unavailable.", "cni_detected": None,
+                      "cni_healthy": False, "nodes_ready": 0,
+                      "nodes_total": 0, "issues": []}
 
-        with Progress(SpinnerColumn(), TextColumn("{task.description}"),
-                      console=console, transient=True) as prog:
-            task = prog.add_task("Collecting network data...", total=None)
-            data, elapsed = collect_all_network()
-            prog.update(task, description="Analysing with Claude...")
-
-            collector_text = "\n".join(
-                f"[{area}] ok={r['ok']} | {r['summary']}"
-                for area, r in data.items()
-            )
-            try:
-                raw = asyncio.run(llm.chat(
-                    messages=[{"role": "user", "content": collector_text}],
-                    system=_SCAN_SYSTEM,
-                    json_mode=True,
-                    max_tokens=1400,
-                ))
-                parsed = _parse_json(raw.content)
-            except Exception as exc:
-                log.warning("network.scan.llm_failed", error=str(exc))
-                parsed = {"summary": "LLM unavailable.", "cni_detected": None,
-                          "cni_healthy": False, "nodes_ready": 0,
-                          "nodes_total": 0, "issues": []}
-
-        report = NetworkScanReport(
+        return NetworkScanReport(
             generated_at  = __import__("datetime").datetime.utcnow().isoformat(),
             collection_ms = elapsed,
             analysis      = parsed.get("summary"),
@@ -145,6 +137,16 @@ class NetworkSkill(BaseSkill):
                 for i in parsed.get("issues", [])
             ],
         )
+
+    def scan(self) -> str:
+        from rich.console import Console
+        from rich.progress import Progress, SpinnerColumn, TextColumn
+
+        console = Console()
+        with Progress(SpinnerColumn(), TextColumn("{task.description}"),
+                      console=console, transient=True) as prog:
+            prog.add_task("Collecting network data and analysing with Claude...", total=None)
+            report = self.scan_report()
 
         _render_scan(console, report)
         return "scan_complete"

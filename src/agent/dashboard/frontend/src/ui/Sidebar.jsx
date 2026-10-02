@@ -9,6 +9,8 @@ export const NAV_TREE = [
   { group: 'Infrastructure', icon: 'ph-cube', items: [
     { id: 'cluster', label: 'Cluster', icon: 'ph-cube' },
     { id: 'databases', label: 'Databases', icon: 'ph-database' },
+    { id: 'network', label: 'Network', icon: 'ph-share-network' },
+    { id: 'costwaste', label: 'Cost & Waste', icon: 'ph-coins' },
   ] },
   { group: 'CI/CD', icon: 'ph-git-branch', items: [
     { id: 'jenkins', label: 'Jenkins', icon: 'ph-hammer' },
