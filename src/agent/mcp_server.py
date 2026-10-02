@@ -318,7 +318,19 @@ async def k8s_scan(namespace: str = "all") -> list[dict]:
     namespace: Kubernetes namespace to scan, or "all" for every namespace.
     """
     def _run():
+        from agent.integrations.kubectl import is_cluster_available
         from agent.skills.k8s import K8sSkill
+
+        # Unlike full_cluster_scan()'s own collectors, which return an empty
+        # list on a kubectl failure, this checks reachability up front — so
+        # "the API server is down" is a distinct, visible result instead of
+        # looking identical to "scanned it, found nothing wrong".
+        if not is_cluster_available():
+            return [{"category": "cluster", "severity": "critical", "resource": "cluster",
+                     "namespace": namespace,
+                     "description": "Cluster is unreachable — kubectl could not connect, "
+                                    "so this is not a clean scan, just a failed connection.",
+                     "fix_command": None}]
         return K8sSkill().full_cluster_scan(namespace)
     return await asyncio.to_thread(_run)
 
