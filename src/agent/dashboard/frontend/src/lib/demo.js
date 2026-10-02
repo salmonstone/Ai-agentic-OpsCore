@@ -229,6 +229,16 @@ const DEMO = {
     const daily = base.map((amount, i) => ({ date: new Date(Date.now() - (30 - i) * D).toISOString().slice(0, 10), amount }))
     return { daily, mean: 12.9, anomalies: [daily[18].date], generated_at: iso(20 * M) }
   },
+  digest: () => ({
+    since: iso(18 * H), had_previous: true, generated_at: iso(30 * 1000),
+    headline: '2 incidents (1 auto-resolved), 3 deploys, 4 auto-fixes, 1 approval(s) waiting.',
+    incidents: { total: 2, open: 1, resolved: 1, items: [
+      { id: 'inc-9', title: 'api latency above SLO', service: 'api', namespace: 'prod', status: 'open' },
+    ] },
+    deploys: { total: 3, failed: 0, rollbacks: 0 },
+    fixes: { total: 4 },
+    approvals: { pending_now: 1, new: 1 },
+  }),
 }
 
 /** Like usePoll, but returns sample data (and fetches nothing) in demo mode.

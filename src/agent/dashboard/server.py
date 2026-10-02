@@ -1026,6 +1026,92 @@ def api_approvals() -> JSONResponse:
     })
 
 
+_FIX_SOURCES = ["auto-healer", "node-healer", "k8s-fix", "security-fix", "tls-fix", "cost-aws-fix", "terraform-fix"]
+# Keyed by `since` (not a single slot like _summary_cache) — different browser
+# tabs legitimately have different "since my last visit" windows. Short TTL:
+# this only needs to survive a burst of near-simultaneous Overview mounts
+# (several tabs, or React's own re-renders), not stay fresh for long.
+_DIGEST_TTL_S = 30
+_digest_cache: dict[str, tuple[float, dict]] = {}
+
+@app.get("/api/digest")
+def api_digest(since: str = "") -> JSONResponse:
+    """What happened since the browser's last visit (or the last 24h, for a
+    first visit) — a delta, not a status snapshot like /api/summary. Each
+    sub-section fails independently and says so, rather than letting one
+    broken integration zero out the whole digest."""
+    import time as _time
+    cached = _digest_cache.get(since)
+    if cached and _time.time() - cached[0] < _DIGEST_TTL_S:
+        return JSONResponse(cached[1])
+
+    from agent.core import approvals
+    from agent.memory import store
+
+    now = datetime.now(timezone.utc)
+    had_previous = bool(since)
+    try:
+        since_dt = datetime.fromisoformat(since.replace("Z", "+00:00")) if since else now - timedelta(hours=24)
+    except ValueError:
+        since_dt, had_previous = now - timedelta(hours=24), False
+    since_dt = max(since_dt, now - timedelta(days=7))   # cap the window — a laptop closed for a month shouldn't scan forever
+    since_iso = since_dt.isoformat()
+    since_hours = max((now - since_dt).total_seconds() / 3600, 0.1)
+
+    out: dict = {"since": since_iso, "had_previous": had_previous, "generated_at": now.isoformat()}
+
+    try:
+        from agent.integrations import incident_db
+        inc = incident_db.list_incidents(since_hours=since_hours, limit=200)
+        resolved = [i for i in inc if i.get("status") in ("resolved", "closed")]
+        open_ = [i for i in inc if i.get("status") not in ("resolved", "closed")]
+        out["incidents"] = {"total": len(inc), "open": len(open_), "resolved": len(resolved),
+                            "items": [{"id": i["id"], "title": i.get("title"), "service": i.get("service"),
+                                       "namespace": i.get("namespace"), "status": i.get("status")} for i in open_[:5]]}
+    except Exception as exc:
+        out["incidents"] = {"error": str(exc)}
+
+    try:
+        deploys = store.list_memories(sources=["deployment"], since=since_iso, limit=200)
+        failed = [m for m in deploys if (m.metadata or {}).get("success") is False]
+        rollbacks = [m for m in deploys if (m.metadata or {}).get("action") == "auto-rollback"]
+        out["deploys"] = {"total": len(deploys), "failed": len(failed), "rollbacks": len(rollbacks)}
+    except Exception as exc:
+        out["deploys"] = {"error": str(exc)}
+
+    try:
+        fixes = store.list_memories(sources=_FIX_SOURCES, since=since_iso, limit=200)
+        out["fixes"] = {"total": len(fixes)}
+    except Exception as exc:
+        out["fixes"] = {"error": str(exc)}
+
+    try:
+        approvals.expire_stale()
+        items = approvals.list_actions(status=None, limit=100)
+        pending_now = [a for a in items if a.status == "pending"]
+        new_asks = [a for a in pending_now if a.created_at >= since_iso]
+        out["approvals"] = {"pending_now": len(pending_now), "new": len(new_asks)}
+    except Exception as exc:
+        out["approvals"] = {"error": str(exc)}
+
+    parts = []
+    if isinstance(out["incidents"], dict) and "error" not in out["incidents"]:
+        n = out["incidents"]["total"]
+        if n: parts.append(f"{n} incident{'s' if n != 1 else ''} ({out['incidents']['resolved']} auto-resolved)")
+    if isinstance(out["deploys"], dict) and "error" not in out["deploys"]:
+        n = out["deploys"]["total"]
+        if n: parts.append(f"{n} deploy{'s' if n != 1 else ''}" + (f", {out['deploys']['failed']} failed" if out["deploys"]["failed"] else ""))
+    if isinstance(out["fixes"], dict) and "error" not in out["fixes"] and out["fixes"]["total"]:
+        parts.append(f"{out['fixes']['total']} auto-fix{'es' if out['fixes']['total'] != 1 else ''}")
+    if isinstance(out["approvals"], dict) and "error" not in out["approvals"] and out["approvals"]["pending_now"]:
+        parts.append(f"{out['approvals']['pending_now']} approval(s) waiting")
+    out["headline"] = ", ".join(parts) + "." if parts else "All quiet — nothing new."
+    _digest_cache[since] = (_time.time(), out)
+    if len(_digest_cache) > 20:   # bound memory — stale per-tab keys shouldn't accumulate forever
+        _digest_cache.pop(next(iter(_digest_cache)))
+    return JSONResponse(out)
+
+
 class ApprovalDecision(BaseModel):
     approve: bool
 

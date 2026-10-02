@@ -114,9 +114,11 @@ def list_memories(
     sources: list[str] | None = None,
     query: str = "",
     before: str = "",
+    since: str = "",
 ) -> list[Memory]:
     """Newest first, optionally only some sources, containing `query`
-    (case-insensitive), and older than `before` (ISO time, for paging)."""
+    (case-insensitive), older than `before` and/or no older than `since`
+    (both ISO time — `before` for paging backwards, `since` for "what's new")."""
     db = _db()
     clauses, params = [], []
     if sources:
@@ -128,6 +130,9 @@ def list_memories(
     if before:
         clauses.append("created_at < ?")
         params.append(before)
+    if since:
+        clauses.append("created_at >= ?")
+        params.append(since)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = db.execute(
         f"SELECT * FROM {_TABLE} {where} ORDER BY created_at DESC LIMIT ?",

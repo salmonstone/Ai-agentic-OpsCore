@@ -107,6 +107,99 @@ def test_summary_is_cached_until_forced(client, server, monkeypatch):
     assert len(calls) == 2
 
 
+# --- digest (the Overview "Briefing" card: what's new, not what's current) ---
+
+def test_digest_defaults_to_24h_and_reports_all_quiet(client, server, isolated_approvals, monkeypatch):
+    server._digest_cache.clear()
+    monkeypatch.setattr("agent.integrations.incident_db.list_incidents", lambda **k: [])
+    monkeypatch.setattr("agent.memory.store.list_memories", lambda **k: [])
+    out = client.get("/api/digest").json()
+    assert out["had_previous"] is False
+    assert out["headline"] == "All quiet — nothing new."
+    assert out["incidents"] == {"total": 0, "open": 0, "resolved": 0, "items": []}
+    assert out["approvals"] == {"pending_now": 0, "new": 0}
+
+
+def test_digest_counts_whats_new(client, server, isolated_approvals, monkeypatch):
+    server._digest_cache.clear()
+    incidents = [
+        {"id": "i1", "title": "pod crashlooping", "service": "api", "namespace": "prod", "status": "open"},
+        {"id": "i2", "title": "disk full", "service": "db", "namespace": "prod", "status": "resolved"},
+    ]
+    monkeypatch.setattr("agent.integrations.incident_db.list_incidents", lambda **k: incidents)
+
+    def fake_list_memories(sources=None, **k):
+        if sources == ["deployment"]:
+            return [SimpleNamespace(metadata={"success": True}), SimpleNamespace(metadata={"success": False})]
+        return [SimpleNamespace(metadata={})] * 4   # the fixes/auto-heal sources
+    monkeypatch.setattr("agent.memory.store.list_memories", fake_list_memories)
+    isolated_approvals.create("test", "Restart api", {})
+
+    out = client.get("/api/digest").json()
+    assert out["incidents"] == {"total": 2, "open": 1, "resolved": 1,
+                                "items": [{"id": "i1", "title": "pod crashlooping", "service": "api", "namespace": "prod", "status": "open"}]}
+    assert out["deploys"] == {"total": 2, "failed": 1, "rollbacks": 0}
+    assert out["fixes"] == {"total": 4}
+    assert out["approvals"] == {"pending_now": 1, "new": 1}
+    assert "2 incidents (1 auto-resolved)" in out["headline"]
+    assert "2 deploys, 1 failed" in out["headline"]
+
+
+def test_digest_isolates_a_failing_subsystem(client, server, isolated_approvals, monkeypatch):
+    server._digest_cache.clear()
+    def boom(**k):
+        raise RuntimeError("incident db is locked")
+    monkeypatch.setattr("agent.integrations.incident_db.list_incidents", boom)
+    monkeypatch.setattr("agent.memory.store.list_memories", lambda **k: [])
+    out = client.get("/api/digest").json()
+    assert out["incidents"] == {"error": "incident db is locked"}
+    assert out["deploys"] == {"total": 0, "failed": 0, "rollbacks": 0}   # one bad section doesn't zero out the rest
+
+
+def test_digest_since_param_is_echoed_and_marks_had_previous(client, isolated_approvals, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.setattr("agent.integrations.incident_db.list_incidents", lambda **k: [])
+    monkeypatch.setattr("agent.memory.store.list_memories", lambda **k: [])
+    since = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+    out = client.get("/api/digest", params={"since": since}).json()
+    assert out["had_previous"] is True
+    assert out["since"] == since
+
+
+def test_digest_is_cached_per_since_value(client, server, isolated_approvals, monkeypatch):
+    server._digest_cache.clear()
+    calls = []
+
+    def counting(**k):
+        calls.append(1)
+        return []
+    monkeypatch.setattr("agent.integrations.incident_db.list_incidents", counting)
+    monkeypatch.setattr("agent.memory.store.list_memories", lambda **k: [])
+
+    client.get("/api/digest")
+    client.get("/api/digest")   # same (empty) `since` — served from cache, no second scan
+    assert len(calls) == 1
+
+    from datetime import datetime, timedelta, timezone
+    other_since = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    client.get("/api/digest", params={"since": other_since})   # a different tab's window — not a cache hit
+    assert len(calls) == 2
+
+
+def test_digest_caps_a_stale_since_at_seven_days(client, isolated_approvals, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    seen_hours = {}
+
+    def capture(since_hours=0, **k):
+        seen_hours["v"] = since_hours
+        return []
+    monkeypatch.setattr("agent.integrations.incident_db.list_incidents", capture)
+    monkeypatch.setattr("agent.memory.store.list_memories", lambda **k: [])
+    ancient = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+    client.get("/api/digest", params={"since": ancient})
+    assert seen_hours["v"] <= 168.01
+
+
 # --- cluster -----------------------------------------------------------------
 
 def test_unreachable_cluster_is_reported_as_unreachable(client, monkeypatch):

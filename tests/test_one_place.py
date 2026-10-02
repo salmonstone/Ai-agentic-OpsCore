@@ -306,6 +306,16 @@ def test_activity_shows_actions_by_default_and_everything_on_request(client):
     assert acts["sources"]["approvals"] == 1
 
 
+def test_list_memories_since_filters_to_whats_new(client):
+    from datetime import datetime, timedelta, timezone
+    from agent.memory import store
+    store.save_memory("Deployment succeeded: api", source="deployment")
+    an_hour_ago = (datetime.utcnow() - timedelta(hours=1)).isoformat()
+    an_hour_ahead = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+    assert len(store.list_memories(sources=["deployment"], since=an_hour_ago)) == 1
+    assert len(store.list_memories(sources=["deployment"], since=an_hour_ahead)) == 0
+
+
 # --- 12. search ------------------------------------------------------------------------------------------
 
 def test_search_finds_records_across_stores(client, monkeypatch, server):

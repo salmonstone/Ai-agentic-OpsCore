@@ -338,10 +338,67 @@ function LiveFeed({ actions, notifications }) {
   )
 }
 
-export default function Overview({ summary, actions, chart, spend, live, incidents, approvals, deploys, cluster, notifications, onNav, onRun, onAsk, onOpenChat, daemonRunning }) {
+/** One stat tile in the Briefing card. Shows "couldn't check" instead of a
+ *  fake zero when its sub-fetch failed — a failure in one integration must
+ *  never silently read as "nothing happened" in another. */
+function BriefStat({ label, go, onNav, value, flagged, error }) {
+  return (
+    <button onClick={() => onNav(go)} className="hoverable" style={{
+      display: 'flex', flexDirection: 'column', gap: 2, padding: '10px 14px', borderRadius: 'var(--radius-md)',
+      border: '1px solid var(--color-divider)', background: 'var(--color-surface)', textAlign: 'left', font: 'inherit', color: 'inherit',
+    }}>
+      <span className="kicker" style={{ fontSize: 10.5 }}>{label}</span>
+      {error
+        ? <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12.5, color: 'var(--st-unk)' }}><Icon name="ph-question" size={14} />couldn't check</span>
+        : <span style={{ fontSize: 20, fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: flagged ? 'var(--st-warn)' : undefined }}>{value}</span>}
+    </button>
+  )
+}
+
+/** "Since you were last here" — a delta, not a status snapshot: what's new
+ *  rather than what's currently true (that's the Status section below it). */
+function Briefing({ digest, onNav }) {
+  const d = digest.data
+  if (!d && digest.loading) return <div className="skel" style={{ height: 92, borderRadius: 'var(--radius-lg)' }} />
+  if (!d) return null   // not critical to the page — a failed digest shouldn't block Overview
+  const windowLabel = d.had_previous ? 'since you were last here' : 'in the last 24 hours'
+  if (d.headline === 'All quiet — nothing new.') {
+    return <OkEmpty title={`All quiet ${windowLabel}`} sub="No new incidents, deploys, or fixes." />
+  }
+  return (
+    <Section>
+      <SectionHead title="Briefing" note={`${windowLabel} · built ${ago(d.generated_at)}`} />
+      <div className="surface" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 14, fontWeight: 500 }}>{d.headline}</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8 }}>
+          <BriefStat label="Incidents" go="incidents" onNav={onNav} value={d.incidents.total} error={d.incidents.error} flagged={d.incidents.open > 0} />
+          <BriefStat label="Deploys" go="deploys" onNav={onNav} value={d.deploys.total} error={d.deploys.error} flagged={d.deploys.failed > 0} />
+          <BriefStat label="Auto-fixes" go="activity" onNav={onNav} value={d.fixes.total} error={d.fixes.error} />
+          <BriefStat label="Waiting now" go="approvals" onNav={onNav} value={d.approvals.pending_now} error={d.approvals.error} flagged={d.approvals.pending_now > 0} />
+        </div>
+        {d.incidents.items?.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {d.incidents.items.map(i => (
+              <button key={i.id} onClick={() => onNav('incidents')} className="hoverable" style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, textAlign: 'left', font: 'inherit', color: 'inherit',
+              }}>
+                <Icon name="ph-siren" style={{ color: 'var(--st-crit)' }} />
+                <span style={{ fontSize: 12.5, flex: 1 }}>{i.title}</span>
+                <span className="muted" style={{ fontSize: 11 }}>{i.service}/{i.namespace}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </Section>
+  )
+}
+
+export default function Overview({ summary, actions, chart, spend, live, incidents, approvals, deploys, digest, cluster, notifications, onNav, onRun, onAsk, onOpenChat, daemonRunning }) {
   const sections = summary.data?.sections
   return (
     <div data-screen-label="01 Overview" style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+      <Briefing digest={digest} onNav={onNav} />
       <ImpactStrip live={live} chart={chart} />
 
       <Section>
