@@ -1314,6 +1314,25 @@ async def api_aws_overview(force: bool = False) -> JSONResponse:
 class ResolveIncident(BaseModel):
     note: str = ""
 
+class CorrelateRequest(BaseModel):
+    minutes: int = 30
+
+@app.post("/api/incidents/correlate")
+def api_incident_correlate(req: CorrelateRequest) -> JSONResponse:
+    """The exact skill `agent incident correlate` uses — gathers deploys,
+    daemon actions, and every skill's memory within the window and asks
+    Claude whether they form one causally-linked incident, instead of
+    leaving a deploy on one page and an incident on another for a human to
+    mentally connect. A high/medium-confidence result opens a real incident
+    (same as the CLI), so this is demo-disabled on the frontend."""
+    from agent.skills.incident_correlation import IncidentCorrelationSkill
+    minutes = max(5, min(req.minutes, 1440))
+    try:
+        result = IncidentCorrelationSkill().correlate(minutes)
+        return JSONResponse(result.model_dump(mode="json"))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)[:500]}, status_code=502)
+
 @app.get("/api/incidents/{incident_id}")
 def api_incident(incident_id: str) -> JSONResponse:
     from agent.integrations import incident_db

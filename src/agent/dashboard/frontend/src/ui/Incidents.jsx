@@ -7,6 +7,82 @@ import { ConfirmButton, Field, Icon, Msg, NoData, OkEmpty, Pill, Section, Sectio
 const EV_ICON = { opened: 'ph-siren', acknowledged: 'ph-eye', resolved: 'ph-check-circle', escalated: 'ph-arrow-fat-up',
   fix_attempt: 'ph-wrench', page_resolved: 'ph-bell-slash', slo_burn_started: 'ph-gauge' }
 
+// The correlator's timeline entries are free-form text from the model, not a
+// fixed enum (unlike EV_ICON above for a real incident's own recorded
+// events) — so pick an icon by keyword instead of an exact lookup.
+function timelineIcon(eventType) {
+  const t = (eventType || '').toLowerCase()
+  if (t.includes('deploy')) return 'ph-rocket-launch'
+  if (t.includes('restart') || t.includes('heal') || t.includes('fix')) return 'ph-wrench'
+  if (t.includes('incident')) return 'ph-siren'
+  if (t.includes('error') || t.includes('spike') || t.includes('fail')) return 'ph-warning'
+  return 'ph-dot-outline'
+}
+
+function Correlate({ demo }) {
+  const [minutes, setMinutes] = useState(30)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null)
+  const [err, setErr] = useState(null)
+  const run = async () => {
+    setBusy(true); setErr(null); setResult(null)
+    try { setResult(await postJSON('/api/incidents/correlate', { minutes })) }
+    catch (e) { setErr(e.message) }
+    setBusy(false)
+  }
+  return (
+    <Section>
+      <SectionHead title="Cross-service timeline" note="correlates deploys, auto-heals and every skill's activity into one causal chain · uses AI">
+        <select className="input mono" style={{ fontSize: 12, padding: '4px 8px' }} value={minutes} onChange={e => setMinutes(+e.target.value)} disabled={busy || demo}>
+          <option value={15}>last 15 min</option>
+          <option value={30}>last 30 min</option>
+          <option value={60}>last hour</option>
+          <option value={180}>last 3 hours</option>
+          <option value={1440}>last 24 hours</option>
+        </select>
+        <button className="btn btn-primary" style={{ fontSize: 12 }} onClick={run} disabled={demo || busy}>
+          <Icon name={busy ? 'ph-circle-notch' : 'ph-sparkle'} className={busy ? 'spin' : undefined} />{busy ? 'Correlating…' : 'Correlate'}
+        </button>
+      </SectionHead>
+      {demo && <div className="muted" style={{ fontSize: 12 }}>Disabled in demo mode — a confident result opens a real incident record.</div>}
+      {err && <NoData note="Correlation failed." error={err} />}
+      {result && !result.has_signal && <OkEmpty title="Nothing to correlate" sub={result.summary} />}
+      {result?.has_signal && !result.is_incident && (
+        <div className="surface" style={{ padding: 14 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 500 }}>Signals look unrelated</div>
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>{result.summary || "The gathered signals don't form a clear causal chain."}</div>
+        </div>
+      )}
+      {result?.is_incident && (
+        <div className="surface" style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <Pill t={SEV_T[(result.severity || '').toLowerCase()] || 'warn'} label={result.severity} icon={false} mono />
+            <Pill t={result.confidence === 'high' ? 'ok' : result.confidence === 'medium' ? 'warn' : 'neutral'} label={`${result.confidence} confidence`} icon={false} />
+            <div style={{ fontSize: 14, fontWeight: 500, flex: 1 }}>{result.title}</div>
+          </div>
+          <div style={{ fontSize: 12.5 }}><b>Root cause:</b> {result.root_cause}</div>
+          {result.contributing_factors?.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5 }}>
+              {result.contributing_factors.map((f, k) => <li key={k}>{f}</li>)}
+            </ul>
+          )}
+          {result.incident_id && <div className="muted" style={{ fontSize: 11.5 }}>Opened as incident <span className="mono">{String(result.incident_id).slice(0, 8)}</span> — see it above.</div>}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+            {result.timeline.map((e, k) => (
+              <div key={k} style={{ display: 'flex', gap: 9, alignItems: 'flex-start', fontSize: 12.5 }}>
+                <Icon name={timelineIcon(e.event_type)} style={{ color: 'var(--color-accent)', marginTop: 2 }} />
+                <span className="mono muted" style={{ fontSize: 11, minWidth: 90 }}>{e.timestamp ? ago(e.timestamp) : '—'}</span>
+                <span style={{ fontWeight: 500 }}>{(e.event_type || 'signal').replace(/_/g, ' ')}</span>
+                {e.detail && <span className="muted" style={{ minWidth: 0, wordBreak: 'break-word' }}>{e.detail}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Section>
+  )
+}
+
 function IncidentRow({ i, onAsk, onChanged }) {
   const demo = useDemo()
   const [open, setOpen] = useState(false)
@@ -142,6 +218,8 @@ export default function Incidents({ incidents, slos, onAsk, onChanged }) {
 
   return (
     <div data-screen-label="05 Incidents & SLOs" style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+      <Correlate demo={demo} />
+
       <Section>
         <SectionHead title="Open incidents" note={incidents.data ? `${open.length} open` : null} />
         {!incidents.data && incidents.loading && <SkeletonRows rows={2} />}

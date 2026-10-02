@@ -107,6 +107,55 @@ def test_summary_is_cached_until_forced(client, server, monkeypatch):
     assert len(calls) == 2
 
 
+# --- incident correlation (cross-service timeline) ----------------------------
+
+def test_incident_correlate_returns_the_skill_result(client, monkeypatch):
+    from agent.core.models import CorrelatedIncident, TimelineEvent
+    seen_minutes = {}
+
+    def fake_correlate(self, minutes=30):
+        seen_minutes["v"] = minutes
+        return CorrelatedIncident(
+            window_minutes=minutes, has_signal=True, is_incident=True, confidence="high",
+            title="api crashlooping after deploy", root_cause="bad image tag",
+            contributing_factors=["no readiness probe"], primary_service="api", namespace="prod",
+            severity="critical", timeline=[TimelineEvent(timestamp="t1", source="correlation", event_type="deploy", detail="api:v2")],
+            incident_id="inc-1", signal_counts={"deploys": 1}, summary="api crashlooping after deploy",
+        )
+    monkeypatch.setattr("agent.skills.incident_correlation.IncidentCorrelationSkill.correlate", fake_correlate)
+
+    out = client.post("/api/incidents/correlate", json={"minutes": 45}).json()
+    assert seen_minutes["v"] == 45
+    assert out["is_incident"] is True and out["confidence"] == "high"
+    assert out["incident_id"] == "inc-1"
+    assert out["timeline"][0]["event_type"] == "deploy"
+
+
+def test_incident_correlate_clamps_minutes_to_a_sane_range(client, monkeypatch):
+    seen = {}
+
+    def fake_correlate(self, minutes=30):
+        seen["v"] = minutes
+        from agent.core.models import CorrelatedIncident
+        return CorrelatedIncident(window_minutes=minutes)
+    monkeypatch.setattr("agent.skills.incident_correlation.IncidentCorrelationSkill.correlate", fake_correlate)
+
+    client.post("/api/incidents/correlate", json={"minutes": 999999})
+    assert seen["v"] == 1440
+    client.post("/api/incidents/correlate", json={"minutes": 0})
+    assert seen["v"] == 5
+
+
+def test_incident_correlate_reports_failure_cleanly(client, monkeypatch):
+    def boom(self, minutes=30):
+        raise RuntimeError("the model timed out")
+    monkeypatch.setattr("agent.skills.incident_correlation.IncidentCorrelationSkill.correlate", boom)
+
+    r = client.post("/api/incidents/correlate", json={"minutes": 30})
+    assert r.status_code == 502
+    assert "the model timed out" in r.json()["error"]
+
+
 # --- cluster -----------------------------------------------------------------
 
 def test_unreachable_cluster_is_reported_as_unreachable(client, monkeypatch):
