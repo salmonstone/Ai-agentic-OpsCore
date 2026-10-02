@@ -204,6 +204,53 @@ def set_cooldown(resource_key: str) -> None:
         con.close()
 
 
+def claim_once(resource_key: str, cooldown_minutes: int) -> bool:
+    """Atomic check-and-set: True only for the caller that gets to proceed
+    (first time seen, or the cooldown has fully elapsed), False for every
+    duplicate caller in between.
+
+    `check_cooldown()` + `set_cooldown()` as two separate calls leaves a gap
+    a second caller can land in, and a database error there falls through as
+    "not seen before" — the least safe answer, since it lets a duplicate
+    through. This does both steps under one lock in one connection, and any
+    exception returns False (already-claimed) instead of True, so a DB
+    problem can't cause double-handling of the same event.
+    """
+    with _lock:
+        try:
+            con = _conn()
+            row = con.execute(
+                "SELECT last_action FROM daemon_cooldowns WHERE resource_key = ?",
+                (resource_key,),
+            ).fetchone()
+            now_dt = datetime.now(timezone.utc)
+            if row:
+                try:
+                    last = datetime.fromisoformat(row["last_action"])
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                except Exception:
+                    last = None
+                if last is not None and (now_dt - last) < timedelta(minutes=cooldown_minutes):
+                    con.close()
+                    return False
+            con.execute(
+                """
+                INSERT INTO daemon_cooldowns (resource_key, last_action, action_count)
+                VALUES (?, ?, 1)
+                ON CONFLICT(resource_key) DO UPDATE SET
+                    last_action = excluded.last_action,
+                    action_count = daemon_cooldowns.action_count + 1
+                """,
+                (resource_key, now_dt.isoformat()),
+            )
+            con.commit()
+            con.close()
+            return True
+        except Exception:
+            return False
+
+
 def get_fix_count(resource_key: str) -> int:
     """How many times this resource has been auto-fixed."""
     con = _conn()
