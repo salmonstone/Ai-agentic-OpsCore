@@ -2006,6 +2006,69 @@ def api_search(q: str) -> JSONResponse:
     return JSONResponse({"results": out[:40]})
 
 
+# ── Kubernetes-level cost estimates ────────────────────────────────────────────
+# Layer 1 of CostAnalysisSkill (kubectl only, no AWS needed): pod/deployment
+# cost from resource requests, with waste detection. The default call is
+# cheap and kubectl-only (no Claude, no `kubectl top`), same defaults as
+# `agent cost scan`, so it's safe to auto-poll; `usage`/`ai` are opt-in, both
+# slower, mirroring the CLI's --usage/--ai flags.
+@app.get("/api/cost/k8s")
+async def api_cost_k8s(usage: bool = False, ai: bool = False) -> JSONResponse:
+    from agent.integrations.kubectl import is_cluster_available
+    if not await _in_thread(is_cluster_available):
+        return JSONResponse({"reachable": False})
+    from agent.skills.cost import CostAnalysisSkill
+
+    def _build():
+        report = CostAnalysisSkill().analyze_cluster_cost("all", with_ai=ai, with_usage=usage)
+        return report.model_dump(mode="json")
+    try:
+        data = await _in_thread(_build, timeout=90)
+    except asyncio.TimeoutError:
+        return JSONResponse({"reachable": True, "error": "The scan took too long — try again without the deeper usage check."}, status_code=504)
+    except Exception as exc:
+        return JSONResponse({"reachable": True, "error": str(exc)[:300]}, status_code=500)
+    return JSONResponse({"reachable": True, **data})
+
+
+# ── network diagnosis ──────────────────────────────────────────────────────────
+# Every scan runs one Claude call (collect_all_network() has no cheap,
+# AI-free path), so this is on-demand only from the dashboard — never
+# auto-polled, the same restraint already applied to Jenkins/TLS scans.
+@app.get("/api/network/scan")
+async def api_network_scan() -> JSONResponse:
+    from agent.integrations.kubectl import is_cluster_available
+    if not await _in_thread(is_cluster_available):
+        return JSONResponse({"reachable": False})
+    from agent.skills.network import NetworkSkill
+    try:
+        data = await _in_thread(lambda: NetworkSkill().scan_report().model_dump(mode="json"), timeout=60)
+    except asyncio.TimeoutError:
+        return JSONResponse({"reachable": True, "error": "The scan took too long."}, status_code=504)
+    except Exception as exc:
+        return JSONResponse({"reachable": True, "error": str(exc)[:300]}, status_code=500)
+    return JSONResponse({"reachable": True, **data})
+
+_CNI_CHOICES = {"calico", "flannel", "cilium", "weave"}
+
+class RestartCni(BaseModel):
+    cni: str = "calico"
+
+@app.post("/api/network/restart-cni")
+async def api_network_restart_cni(req: RestartCni) -> JSONResponse:
+    if req.cni not in _CNI_CHOICES:
+        return _bad(f"Unknown CNI '{req.cni}'. Choose one of: {', '.join(sorted(_CNI_CHOICES))}.")
+    from agent.integrations.kubectl import is_cluster_available
+    if not await _in_thread(is_cluster_available):
+        return _bad("The cluster isn't reachable.", 503)
+    from agent.skills.network import NetworkSkill
+    result = await _in_thread(lambda: NetworkSkill().restart_cni(req.cni))
+    ok = result == "restart_done"
+    if ok:
+        audit.record(f"Dashboard: restarted the {req.cni} CNI DaemonSet")
+    return JSONResponse({"ok": ok})
+
+
 # ── SPA catch-all (must be last — only when dist/ is present) ─────────────────
 if _DIST.exists():
     @app.get("/{full_path:path}")

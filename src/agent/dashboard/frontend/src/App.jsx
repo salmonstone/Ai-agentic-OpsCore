@@ -16,7 +16,9 @@ import Login from './ui/Login'
 import LogViewer from './ui/LogViewer'
 import Activity from './ui/Activity'
 import Automation from './ui/Automation'
+import CostWaste from './ui/CostWaste'
 import Databases from './ui/Databases'
+import Network from './ui/Network'
 import Deploys from './ui/Deploys'
 import Domains from './ui/Domains'
 import Settings from './ui/Settings'
@@ -36,6 +38,8 @@ const TITLES = {
   github: ['GitHub Actions', 'Workflow runs, failures and their logs'],
   aws: ['AWS', 'Spend, and every resource in your region'],
   databases: ['Databases', 'RDS and Aurora health — CPU, storage, connections, latency'],
+  network: ['Network', 'CNI, kube-proxy, NetworkPolicy and service connectivity'],
+  costwaste: ['Cost & Waste', 'What your cluster actually costs, from resource requests'],
   domains: ['Domains & HTTPS', 'Is every site live? Turn on HTTPS in one step'],
   deploys: ['Deploys', 'GitHub pushes become risk-checked deploys — set it up here'],
   automation: ['Automation', 'Runbooks, auto-scaling schedules and the daily summary'],
@@ -448,6 +452,8 @@ function Shell() {
           {panel === 'github' && <GitHubPanel refreshKey={refreshKey} onAsk={ask} onLogs={setLogSource} />}
           {panel === 'aws' && <AwsPanel refreshKey={refreshKey} onAsk={ask} />}
           {panel === 'databases' && <Databases key={refreshKey} onAsk={ask} />}
+          {panel === 'network' && <Network key={refreshKey} onAsk={ask} />}
+          {panel === 'costwaste' && <CostWaste key={refreshKey} onAsk={ask} />}
           {panel === 'domains' && <Domains key={refreshKey} onAsk={ask} />}
           {panel === 'deploys' && <Deploys key={refreshKey} onNav={setPanel} />}
           {panel === 'automation' && <Automation key={refreshKey} summary={summary} onLogs={setLogSource} />}

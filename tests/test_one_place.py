@@ -316,3 +316,84 @@ def test_search_finds_records_across_stores(client, monkeypatch, server):
     kinds = {r["kind"] for r in client.get("/api/search", params={"q": "payments"}).json()["results"]}
     assert {"Incident", "SLO", "Scaling policy", "EC2"} <= kinds
     assert client.get("/api/search", params={"q": "p"}).json()["results"] == []
+
+
+# --- 13. Kubernetes-level cost estimates -----------------------------------------------------------------
+
+def test_k8s_cost_says_unreachable_instead_of_zero(client, monkeypatch):
+    monkeypatch.setattr("agent.integrations.kubectl.is_cluster_available", lambda: False)
+    assert client.get("/api/cost/k8s").json() == {"reachable": False}
+
+
+def test_k8s_cost_returns_the_report_and_defaults_are_cheap(client, monkeypatch):
+    from agent.core.models import CostReport, DeploymentCost
+    seen = {}
+    monkeypatch.setattr("agent.integrations.kubectl.is_cluster_available", lambda: True)
+    def fake_analyze(self, namespace, include_system=False, with_ai=True, with_usage=False):
+        seen.update(namespace=namespace, with_ai=with_ai, with_usage=with_usage)
+        return CostReport(cluster_name="kind-test", total_nodes=2, total_monthly_node_cost=140.0,
+                          total_requested_cost=90.0, total_waste_cost=30.0, waste_percent=33,
+                          deployments=[DeploymentCost(deployment="api", namespace="prod", pod_count=3,
+                                                      est_monthly_cost=40.0, waste_percent=50, waste_label="over-provisioned")])
+    monkeypatch.setattr("agent.skills.cost.CostAnalysisSkill.analyze_cluster_cost", fake_analyze)
+
+    r = client.get("/api/cost/k8s").json()
+    assert r["reachable"] is True and r["cluster_name"] == "kind-test" and r["total_waste_cost"] == 30.0
+    assert r["deployments"][0]["deployment"] == "api"
+    assert seen == {"namespace": "all", "with_ai": False, "with_usage": False}      # cheap by default, like `agent cost scan`
+
+    client.get("/api/cost/k8s", params={"usage": "true", "ai": "true"})
+    assert seen == {"namespace": "all", "with_ai": True, "with_usage": True}
+
+
+# --- 14. network diagnosis --------------------------------------------------------------------------------
+
+def test_network_scan_says_unreachable_instead_of_healthy(client, monkeypatch):
+    monkeypatch.setattr("agent.integrations.kubectl.is_cluster_available", lambda: False)
+    assert client.get("/api/network/scan").json() == {"reachable": False}
+
+
+def test_network_scan_returns_the_report(client, monkeypatch):
+    from agent.core.models import NetworkIssue, NetworkProblemType, NetworkScanReport
+    monkeypatch.setattr("agent.integrations.kubectl.is_cluster_available", lambda: True)
+    report = NetworkScanReport(generated_at="2026-10-02T00:00:00", collection_ms=820.0,
+                               analysis="Calico is healthy; one service has no endpoints.",
+                               cni_detected="calico", cni_healthy=True, nodes_ready=3, nodes_total=3,
+                               issues=[NetworkIssue(severity="warning", problem_type=NetworkProblemType.SERVICE_NO_ENDPOINTS,
+                                                    resource="billing-api", namespace="prod",
+                                                    description="no ready pods", fix="check deployment",
+                                                    fix_command="kubectl get endpoints billing-api -n prod")])
+    monkeypatch.setattr("agent.skills.network.NetworkSkill.scan_report", lambda self: report)
+
+    r = client.get("/api/network/scan").json()
+    assert r["reachable"] is True and r["cni_detected"] == "calico" and r["nodes_ready"] == 3
+    assert r["issues"][0]["problem_type"] == "ServiceNoEndpoints"            # enum serialized to its value
+    assert r["issues"][0]["resource"] == "billing-api"
+
+
+def test_network_scan_surfaces_a_failure_without_crashing(client, monkeypatch):
+    monkeypatch.setattr("agent.integrations.kubectl.is_cluster_available", lambda: True)
+    def boom(self):
+        raise RuntimeError("collector timed out")
+    monkeypatch.setattr("agent.skills.network.NetworkSkill.scan_report", boom)
+    r = client.get("/api/network/scan")
+    assert r.status_code == 500 and r.json()["reachable"] is True and "timed out" in r.json()["error"]
+
+
+def test_restart_cni_validates_the_choice(client):
+    assert client.post("/api/network/restart-cni", json={"cni": "nginx"}).status_code == 400
+
+
+def test_restart_cni_runs_and_audits(client, monkeypatch, audit_log):
+    monkeypatch.setattr("agent.integrations.kubectl.is_cluster_available", lambda: True)
+    monkeypatch.setattr("agent.skills.network.NetworkSkill.restart_cni", lambda self, cni: "restart_done")
+    r = client.post("/api/network/restart-cni", json={"cni": "calico"})
+    assert r.json() == {"ok": True}
+    assert any("restarted the calico CNI" in l for l in audit_log)
+
+
+def test_restart_cni_reports_failure_without_audit(client, monkeypatch, audit_log):
+    monkeypatch.setattr("agent.integrations.kubectl.is_cluster_available", lambda: True)
+    monkeypatch.setattr("agent.skills.network.NetworkSkill.restart_cni", lambda self, cni: "restart_failed")
+    r = client.post("/api/network/restart-cni", json={"cni": "calico"})
+    assert r.json() == {"ok": False} and audit_log == []
