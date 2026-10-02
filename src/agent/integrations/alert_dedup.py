@@ -37,8 +37,8 @@ def _send_resolved() -> bool:
 
 
 def _get_conn() -> sqlite3.Connection:
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(_DB_PATH))
+    from agent.integrations.sqlite_conn import connect
+    conn = connect(_DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS alert_history (
             fingerprint   TEXT PRIMARY KEY,

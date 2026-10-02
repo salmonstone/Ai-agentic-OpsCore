@@ -46,11 +46,8 @@ CREATE TABLE IF NOT EXISTS slo_burns (
 
 
 def _conn() -> sqlite3.Connection:
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-    con.row_factory = sqlite3.Row
-    con.executescript(_DDL)
-    return con
+    from agent.integrations.sqlite_conn import connect
+    return connect(_DB_PATH, _DDL)
 
 
 def _now() -> str:
