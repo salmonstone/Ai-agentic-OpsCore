@@ -19,6 +19,7 @@ import Automation from './ui/Automation'
 import Databases from './ui/Databases'
 import Deploys from './ui/Deploys'
 import Domains from './ui/Domains'
+import ErrorBoundary from './ui/ErrorBoundary'
 import Settings from './ui/Settings'
 import SetupChecklist from './ui/SetupChecklist'
 import System from './ui/System'
@@ -78,6 +79,46 @@ function useWidth() {
     return () => window.removeEventListener('resize', on)
   }, [])
   return w
+}
+
+/** So something needing attention is visible even when this tab isn't the
+ *  focused one: the tab title gets a "(N)" prefix and the favicon gets a
+ *  small red badge drawn over it. The base icon is loaded once and cached;
+ *  drawing is best-effort — a browser that can't do this just keeps the
+ *  plain title, which is still correct, just less visible. */
+function useTitleBadge(count) {
+  const baseImg = useRef(null)
+  const baseTitle = useRef(document.title)
+  useEffect(() => {
+    document.title = count > 0 ? `(${count > 99 ? '99+' : count}) ${baseTitle.current}` : baseTitle.current
+  }, [count])
+  useEffect(() => {
+    const link = document.getElementById('favicon')
+    if (!link) return
+    if (count === 0) { link.href = '/favicon.svg'; return }
+    const draw = img => {
+      try {
+        const size = 64
+        const canvas = document.createElement('canvas')
+        canvas.width = size; canvas.height = size
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(img, 0, 0, size, size)
+        const r = 15, cx = size - r - 2, cy = size - r - 2
+        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2)
+        ctx.fillStyle = '#e5484d'; ctx.fill()
+        ctx.lineWidth = 3; ctx.strokeStyle = '#161826'; ctx.stroke()
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 24px sans-serif'
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+        ctx.fillText(count > 9 ? '9+' : String(count), cx, cy + 1)
+        link.href = canvas.toDataURL('image/png')
+      } catch { /* canvas unavailable in this context — title badge still works */ }
+    }
+    if (baseImg.current) { draw(baseImg.current); return }
+    const img = new Image()
+    img.onload = () => { baseImg.current = img; draw(img) }
+    img.onerror = () => {}
+    img.src = '/favicon.svg'
+  }, [count])
 }
 
 const CHAT_W_MIN = 320, CHAT_W_MAX = 640, CHAT_W_DEFAULT = 388
@@ -366,6 +407,7 @@ function Shell() {
     approvals: pendingCount ? { n: pendingCount, t: 'warn' } : null,
     incidents: live?.stats?.incidents_open ? { n: live.stats.incidents_open, t: 'crit' } : null,
   }
+  useTitleBadge(demo ? 0 : (badges.approvals?.n || 0) + (badges.incidents?.n || 0))
   const [title, sub] = TITLES[panel]
   const showBanner = !demo && live?.offline && (panel === 'overview' || panel === 'cluster')
   const allCommands = useMemo(() => Object.values(commands.data || {}).flat().filter(c => !c.is_eval), [commands.data])
@@ -377,8 +419,10 @@ function Shell() {
   ], [theme, demo])
 
   const sidebar = (
-    <Sidebar panel={panel} onNav={setPanel} badges={badges} live={live} context={context}
-      theme={theme} onToggleTheme={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))} />
+    <ErrorBoundary label="sidebar">
+      <Sidebar panel={panel} onNav={setPanel} badges={badges} live={live} context={context}
+        theme={theme} onToggleTheme={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))} />
+    </ErrorBoundary>
   )
   const showChatPanel = dock && chatOpen
 
@@ -437,6 +481,7 @@ function Shell() {
             </div>
           )}
 
+          <ErrorBoundary key={panel} label="page" onReset={() => setPanel('overview')}>
           {panel === 'overview' && <SetupChecklist live={live} context={context} onNav={setPanel} />}
           {panel === 'overview' && (
             <OverviewPanel refreshKey={refreshKey} summary={summary} actions={actions} chart={chart} spend={spend} live={live}
@@ -458,6 +503,7 @@ function Shell() {
           {panel === 'incidents' && <IncidentsPanel refreshKey={refreshKey} onAsk={ask} />}
           {panel === 'commands' && <Commands key={cmdSel || 'none'} commands={commands} context={context} initial={cmdSel} />}
           {panel === 'about' && <AboutPanel refreshKey={refreshKey} about={about} chatInfo={chatInfo} />}
+          </ErrorBoundary>
           </main>
 
           {showChatPanel && (
@@ -471,8 +517,10 @@ function Shell() {
                 }}
                 style={{ position: 'absolute', left: -4, top: 0, bottom: 0, width: 8, cursor: 'col-resize', zIndex: 20 }}
                 title="Drag to resize · double-click to reset" />
-              <ChatWidget variant="panel" open setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
-                incidents={incidents} onNav={setPanel} />
+              <ErrorBoundary label="assistant" inline>
+                <ChatWidget variant="panel" open setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
+                  incidents={incidents} onNav={setPanel} />
+              </ErrorBoundary>
             </div>
           )}
         </div>
@@ -480,8 +528,10 @@ function Shell() {
         <LogViewer source={logSource} onClose={() => setLogSource(null)} onAsk={ask} />
         <RunDrawer run={run}onClose={() => setRun(null)} onRerun={lastQuick.current ? () => runQuick(lastQuick.current) : null} onAsk={askAboutRun} />
         {!showChatPanel && (
-          <ChatWidget variant="overlay" open={chatOpen} setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
-            incidents={incidents} onNav={setPanel} />
+          <ErrorBoundary label="assistant" inline>
+            <ChatWidget variant="overlay" open={chatOpen} setOpen={setChatOpen} askRequest={askRequest} context={context} info={chatInfo}
+              incidents={incidents} onNav={setPanel} />
+          </ErrorBoundary>
         )}
         <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} nav={NAV} quick={quickItems} commands={allCommands}
           onNav={setPanel} onRun={runQuick} onPickCommand={c => { setCmdSel(c); setPanel('commands') }} onAsk={ask} toggles={toggles} />

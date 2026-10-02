@@ -42,6 +42,33 @@ await build({
   logLevel: 'info',
 }).catch(() => process.exit(1))
 
+// Favicon, also used as the one PWA icon (an inline SVG works as an "any"-
+// size icon in current Chromium/Edge — no raster generation needed).
+copyFileSync('public/favicon.svg', 'dist/favicon.svg')
+
+// Installable as a desktop/mobile app: a manifest plus a service worker.
+// Chromium's install prompt wants both present, even a worker this trivial
+// — it intentionally caches nothing (the dashboard changes too often for a
+// stale-asset policy to be worth it) and just lets every request through.
+writeFileSync('dist/manifest.webmanifest', JSON.stringify({
+  name: 'AtlasOS',
+  short_name: 'AtlasOS',
+  description: 'Agentic DevOps OS — cluster, CI/CD, cost and incidents in one dashboard.',
+  start_url: '/',
+  scope: '/',
+  display: 'standalone',
+  background_color: '#161826',
+  theme_color: '#161826',
+  icons: [{ src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }],
+}, null, 2))
+
+writeFileSync('dist/sw.js', `// Intentionally a pass-through: present so the browser considers AtlasOS
+// installable, caches nothing so there is no stale-asset policy to manage.
+self.addEventListener('install', () => self.skipWaiting())
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()))
+self.addEventListener('fetch', () => {})
+`)
+
 // Write index.html
 writeFileSync('dist/index.html', `<!DOCTYPE html>
 <html lang="en">
@@ -49,6 +76,9 @@ writeFileSync('dist/index.html', `<!DOCTYPE html>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AtlasOS</title>
+  <meta name="theme-color" content="#161826" />
+  <link rel="icon" id="favicon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/assets/index.css" />
 </head>
 <body>
