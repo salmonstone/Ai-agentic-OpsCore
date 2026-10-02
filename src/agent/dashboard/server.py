@@ -2006,6 +2006,23 @@ def api_search(q: str) -> JSONResponse:
     return JSONResponse({"results": out[:40]})
 
 
+# ── PWA assets: served at the site root, so each needs its own route — the
+# catch-all below would otherwise return index.html for them too. Must come
+# before that catch-all.
+if _DIST.exists():
+    @app.get("/favicon.svg", include_in_schema=False)
+    def favicon() -> FileResponse:
+        return FileResponse(str(_DIST / "favicon.svg"), media_type="image/svg+xml")
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    def pwa_manifest() -> FileResponse:
+        return FileResponse(str(_DIST / "manifest.webmanifest"), media_type="application/manifest+json")
+
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker() -> FileResponse:
+        return FileResponse(str(_DIST / "sw.js"), media_type="text/javascript")
+
+
 # ── SPA catch-all (must be last — only when dist/ is present) ─────────────────
 if _DIST.exists():
     @app.get("/{full_path:path}")

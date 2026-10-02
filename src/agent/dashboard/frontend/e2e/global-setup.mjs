@@ -73,14 +73,16 @@ export default async function globalSetup() {
     })
     // Windows doesn't always release the SQLite file handles the instant
     // the process exits — retry past the brief EPERM/EBUSY window rather
-    // than leaving the temp dir behind.
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    // than leaving the temp dir behind. A leftover temp dir is harmless
+    // (the OS reclaims it eventually), so a final failure here is logged,
+    // not thrown — it must never fail an otherwise-green test run.
+    for (let attempt = 1; attempt <= 10; attempt++) {
       try {
         rmSync(tempDir, { recursive: true, force: true })
-        break
+        return
       } catch (err) {
-        if (attempt === 5) throw err
-        await new Promise(r => setTimeout(r, 300))
+        if (attempt === 10) { console.warn(`[e2e] couldn't remove ${tempDir}: ${err.message}`); return }
+        await new Promise(r => setTimeout(r, 400))
       }
     }
   }

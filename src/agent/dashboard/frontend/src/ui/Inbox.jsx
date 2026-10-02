@@ -26,6 +26,8 @@ export default function Inbox({ onNav, demo }) {
   const inbox = useData('notifications', '/api/notifications?limit=60', 15000, isDemo)
   const [open, setOpen] = useState(false)
   const [desktop, setDesktop] = useState(notifyEnabled)
+  const [busy, setBusy] = useState({})
+  const [decided, setDecided] = useState({})
   const seen = useRef(null)
   const ref = useRef(null)
 
@@ -64,6 +66,24 @@ export default function Inbox({ onNav, demo }) {
   }
   const toggleDesktop = async () => { await setNotify(!desktop); setDesktop(notifyEnabled()) }
 
+  // Approve/reject right here — no detour through the Approvals page. Only
+  // shown when the notification carries the id it was recorded with
+  // (every real approval/deploy request does; the demo fixture doesn't,
+  // so demo mode falls back to its existing navigate-on-click).
+  const decide = async (n, approve) => {
+    setBusy(b => ({ ...b, [n.id]: true }))
+    try {
+      if (n.meta?.deploy_id) await postJSON(`/api/deploys/${n.meta.deploy_id}/${approve ? 'approve' : 'reject'}`)
+      else await postJSON(`/api/approvals/${n.meta.approval_id}/decide`, { approve })
+      setDecided(d => ({ ...d, [n.id]: approve ? 'approved' : 'rejected' }))
+    } catch {
+      setDecided(d => ({ ...d, [n.id]: 'failed' }))
+    }
+    setBusy(b => ({ ...b, [n.id]: false }))
+    if (!n.read) await postJSON('/api/notifications/read', { ids: [n.id] }).catch(() => {})
+    inbox.reload()
+  }
+
   return (
     <div ref={ref} style={{ position: 'relative' }}>
       <button className="btn btn-secondary" onClick={() => setOpen(o => !o)} aria-label={`Notifications${unread ? `, ${unread} unread` : ''}`}
@@ -91,20 +111,36 @@ export default function Inbox({ onNav, demo }) {
             {items.map(n => {
               const [c, sevIcon] = SEV[n.severity] || SEV.info
               const t = target(n)
+              const id = n.meta?.approval_id || n.meta?.deploy_id
+              const actionable = n.kind === 'approval' && id && !decided[n.id]
+              const clickable = t || !n.read
               return (
-                <button key={n.id} onClick={() => openItem(n)} className="rowbtn" style={{
-                  display: 'flex', gap: 10, width: '100%', padding: '10px 14px', border: 0, textAlign: 'left', cursor: t || !n.read ? 'pointer' : 'default',
-                  background: n.read ? 'transparent' : 'color-mix(in srgb, var(--color-accent) 7%, transparent)',
-                  borderBottom: '1px solid color-mix(in srgb, var(--color-text) 6%, transparent)',
-                }}>
+                <div key={n.id} role={clickable ? 'button' : undefined} tabIndex={clickable ? 0 : undefined}
+                  onClick={() => openItem(n)} onKeyDown={e => { if (clickable && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openItem(n) } }}
+                  className="rowbtn" style={{
+                    display: 'flex', gap: 10, width: '100%', padding: '10px 14px', textAlign: 'left', cursor: clickable ? 'pointer' : 'default',
+                    background: n.read ? 'transparent' : 'color-mix(in srgb, var(--color-accent) 7%, transparent)',
+                    borderBottom: '1px solid color-mix(in srgb, var(--color-text) 6%, transparent)',
+                  }}>
                   <Icon name={KIND_ICON[n.kind] || sevIcon} size={17} style={{ color: c, marginTop: 1, flex: 'none' }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: n.read ? 400 : 600, lineHeight: 1.35 }}>{n.title}</div>
                     {n.message && <div className="muted" style={{ fontSize: 12, marginTop: 2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{n.message.replace(/[*`]/g, '')}</div>}
                     <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{ago(n.created_at)} · {n.kind}{t ? ` · open ${t}` : ''}</div>
+                    {actionable && (
+                      <div style={{ display: 'flex', gap: 6, marginTop: 7 }} onClick={e => e.stopPropagation()}>
+                        <button className="btn btn-primary" style={{ fontSize: 11.5, padding: '3px 9px' }} disabled={isDemo || busy[n.id]} onClick={() => decide(n, true)}><Icon name="ph-check" />Approve</button>
+                        <button className="btn btn-secondary" style={{ fontSize: 11.5, padding: '3px 9px' }} disabled={isDemo || busy[n.id]} onClick={() => decide(n, false)}><Icon name="ph-x" />Reject</button>
+                      </div>
+                    )}
+                    {decided[n.id] && (
+                      <div style={{ fontSize: 11.5, marginTop: 5, color: decided[n.id] === 'failed' ? 'var(--st-crit)' : 'var(--st-ok)' }}>
+                        <Icon name={decided[n.id] === 'failed' ? 'ph-x-circle' : 'ph-check-circle'} /> {decided[n.id] === 'approved' ? 'Approved' : decided[n.id] === 'rejected' ? 'Rejected' : "Couldn't decide — open Approvals"}
+                      </div>
+                    )}
                   </div>
                   {!n.read && <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--color-accent)', marginTop: 6, flex: 'none' }} />}
-                </button>
+                </div>
               )
             })}
           </div>
