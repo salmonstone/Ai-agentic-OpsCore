@@ -148,13 +148,13 @@ function IncidentsPanel({ refreshKey, onAsk }) {
   useRefresh(incidents, refreshKey); useRefresh(slos, refreshKey)
   return <Incidents incidents={incidents} slos={slos} onAsk={onAsk} onChanged={() => { incidents.reload(); slos.reload() }} />
 }
-function OverviewPanel({ refreshKey, summary, actions, chart, spend, live, incidents, approvals, deploys, onNav, onRun, onAsk, onOpenChat, daemonRunning, demo }) {
+function OverviewPanel({ refreshKey, summary, actions, chart, spend, live, incidents, approvals, deploys, digest, onNav, onRun, onAsk, onOpenChat, daemonRunning, demo }) {
   const clusterMini = useData('cluster', '/api/cluster', 30000, demo)
   const notifications = useData('notifications', '/api/notifications?limit=12', 20000, demo)
   useRefresh(clusterMini, refreshKey); useRefresh(notifications, refreshKey)
   return (
     <Overview summary={summary} actions={actions} chart={chart} spend={spend} live={live} incidents={incidents}
-      approvals={approvals} deploys={deploys} cluster={clusterMini} notifications={notifications}
+      approvals={approvals} deploys={deploys} digest={digest} cluster={clusterMini} notifications={notifications}
       onNav={onNav} onRun={onRun} onAsk={onAsk} onOpenChat={onOpenChat} daemonRunning={daemonRunning} />
   )
 }
@@ -301,6 +301,11 @@ function Shell() {
   const commands = usePoll('/api/commands')
   const chatInfo = usePoll('/api/chat/info')
   const about = usePoll('/api/about')
+  // Captured once, lazily, before the mount effect below overwrites it — so the
+  // digest's window is "since the last time this browser opened the dashboard."
+  const [digestSince] = useState(() => load('atlas-last-visit', ''))
+  const digest = useData('digest', `/api/digest${digestSince ? `?since=${encodeURIComponent(digestSince)}` : ''}`, 0, demo)
+  useEffect(() => { save('atlas-last-visit', new Date().toISOString()) }, [])
 
   useEffect(() => { document.documentElement.dataset.theme = theme; save('atlas-theme', theme) }, [theme])
   useEffect(() => { save('atlas-demo', demo ? '1' : '0') }, [demo])
@@ -440,7 +445,7 @@ function Shell() {
           {panel === 'overview' && <SetupChecklist live={live} context={context} onNav={setPanel} />}
           {panel === 'overview' && (
             <OverviewPanel refreshKey={refreshKey} summary={summary} actions={actions} chart={chart} spend={spend} live={live}
-              incidents={incidents} approvals={approvals} deploys={deploys} onNav={setPanel} onRun={runQuick} onAsk={ask}
+              incidents={incidents} approvals={approvals} deploys={deploys} digest={digest} onNav={setPanel} onRun={runQuick} onAsk={ask}
               onOpenChat={() => setChatOpen(true)} daemonRunning={!!live?.stats?.daemon_running} demo={demo} />
           )}
           {panel === 'cluster' && <ClusterPanel refreshKey={refreshKey} onAsk={ask} onConnected={() => clusters.reload()} onLogs={setLogSource} />}
