@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import ast
 import os
-import sqlite3
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -197,7 +196,8 @@ def _sqlite_count(db_path: Path, table: str) -> int:
     if not db_path.exists():
         return 0
     try:
-        con = sqlite3.connect(str(db_path))
+        from agent.integrations.sqlite_conn import connect
+        con = connect(db_path)
         try:
             row = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
             return int(row[0]) if row else 0
@@ -480,7 +480,8 @@ class AboutSkill(BaseSkill):
         if not db_path.exists():
             return "—"
         try:
-            con = sqlite3.connect(str(db_path))
+            from agent.integrations.sqlite_conn import connect
+            con = connect(db_path)
             try:
                 row = con.execute(
                     "SELECT created_at FROM memories ORDER BY created_at DESC LIMIT 1"
